@@ -1,3 +1,10 @@
+// ----------------------------------------------------------------------------
+// "THE BIERWARE LICENSE" (Revision 1):
+// <67437654+DasPauluteli@users.noreply.github.com> wrote this file. As long as
+// you retain this notice you can do whatever you want with this stuff. If we
+// meet some day you have to buy me a beer in return - Paul Neri
+// ----------------------------------------------------------------------------
+
 //! Minimal MD5, used only to label a build so two people can tell whether they
 //! are looking at the same `discord_voice.node`. Nothing security-relevant
 //! depends on it; the patcher validates by instruction context, not by hash.

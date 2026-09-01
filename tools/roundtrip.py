@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# ----------------------------------------------------------------------------
+# "THE BIERWARE LICENSE" (Revision 1):
+# <67437654+DasPauluteli@users.noreply.github.com> wrote this file. As long as
+# you retain this notice you can do whatever you want with this stuff. If we
+# meet some day you have to buy me a beer in return - Paul Neri
+# ----------------------------------------------------------------------------
+
 """Measure what Discord's voice path actually does to audio.
 
 The patch changes an encoder configuration. Whether that reaches the far end is

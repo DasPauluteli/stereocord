@@ -170,3 +170,14 @@ Discord measurement.
   `stereocord patch` again. `scan` detects this state and says so.
 - Editing client files is against Discord's terms of service (see the warning at
   the top). Your account, your call.
+
+## License
+
+[THE BIERWARE LICENSE](LICENSE) (Revision 1).
+
+> `<67437654+DasPauluteli@users.noreply.github.com>` wrote this file. As long as
+> you retain this notice you can do whatever you want with this stuff. If we
+> meet some day you have to buy me a beer in return — Paul Neri
+
+The notice is reproduced at the top of every source file. Retaining it is the
+one condition on the grant, so keep it there if you copy any of this.
