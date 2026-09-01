@@ -23,6 +23,7 @@ Subcommands:
   signal    write the test signal to a WAV
   selftest  validate the analysis against signals with known properties
   setup     create the virtual sinks a measurement needs
+  loopback  check the routing carries the probe, before involving a call
   streams   list playback streams, to route the receiving endpoint
   teardown  remove the virtual sinks
   devices   list PipeWire nodes, to find capture/playback targets
@@ -307,6 +308,7 @@ def analyze(rec_path, label):
 
 PROBE_SINK = "stereocord_probe"
 CAPTURE_SINK = "stereocord_capture"
+PROBE_SOURCE = "stereocord_mic"
 
 
 def _pactl(*args, check=True):
@@ -315,12 +317,10 @@ def _pactl(*args, check=True):
 
 
 def _module_ids():
-    """Module ids of the null sinks this script created."""
-    ids = []
-    for line in _pactl("list", "short", "modules", check=False).splitlines():
-        if "module-null-sink" in line and (PROBE_SINK in line or CAPTURE_SINK in line):
-            ids.append(line.split()[0])
-    return ids
+    """Module ids of everything this script loaded."""
+    return [line.split()[0]
+            for line in _pactl("list", "short", "modules", check=False).splitlines()
+            if "stereocord" in line]
 
 
 def setup():
@@ -338,17 +338,35 @@ def setup():
             continue
         _pactl("load-module", "module-null-sink", f"sink_name={name}",
                f"sink_properties=device.description={name}")
-        print(f"  created {name}")
+        print(f"  created sink {name}")
+
+    # A null sink's monitor is a source, but most device pickers hide monitors:
+    # desktop sound settings filter them out, and a browser will not offer one
+    # as a microphone. Remapping the monitor produces a first-class input that
+    # applications list like any other microphone.
+    if PROBE_SOURCE not in _pactl("list", "short", "sources", check=False):
+        _pactl("load-module", "module-remap-source",
+               f"source_name={PROBE_SOURCE}", f"master={PROBE_SINK}.monitor",
+               f"source_properties=device.description={PROBE_SOURCE}")
+        print(f"  created source {PROBE_SOURCE}")
+    else:
+        print(f"  {PROBE_SOURCE} already exists")
+
     print(f"""
+Check the routing before involving a call:
+
+  python3 tools/roundtrip.py loopback
+
 Now, in the SENDING Discord (the patched desktop client):
-  Voice & Video -> Input Device -> "Monitor of {PROBE_SINK}"
+  Voice & Video -> Input Device -> "{PROBE_SOURCE}"
   Turn OFF noise suppression, echo cancellation and automatic gain control.
   Set Input Mode to Push to Talk and hold it during the capture, or drag
   Input Sensitivity fully left so it always transmits. Voice activity
   detection will gate the quiet parts of the sweep and ruin the measurement.
 
 Then join a voice channel from a SECOND endpoint signed in as a different
-account, and route its audio into the capture sink:
+account. It needs no device selection of its own - its audio is moved with
+pactl rather than chosen in its settings:
 
   python3 tools/roundtrip.py streams        # find its index
   pactl move-sink-input <index> {CAPTURE_SINK}
@@ -389,6 +407,44 @@ def list_streams():
     for idx, name in rows:
         print(f"  {idx:>5}  {name}")
     print(f"\n  pactl move-sink-input <index> {CAPTURE_SINK}")
+
+
+def loopback(tmp_wav):
+    """Send the probe through the virtual devices and measure the result.
+
+    No call involved, so nothing should change: this checks the routing, not
+    Discord. A clean result here means a later bad measurement is Discord's
+    doing rather than a wiring mistake, which is worth knowing before spending
+    the effort of setting up two accounts.
+    """
+    import os
+
+    if not os.path.exists("probe.wav"):
+        write_wav("probe.wav", build_signal())
+        print("  wrote probe.wav")
+    capture("probe.wav", tmp_wav, PROBE_SINK, PROBE_SOURCE, TOTAL + 3)
+    r = analyze(tmp_wav, "loopback")
+    checks = [
+        ("recording is stereo", r["channels"] == 2, f"{r['channels']} channels"),
+        ("channels stayed independent", r["stereo"],
+         f"correlation {r['channel_correlation']:.4f}"),
+        ("full bandwidth", (r["bandwidth_hz"] or 0) >= 18000,
+         f"{r['bandwidth_hz']:.0f} Hz"),
+        ("delay is buffering only", (r["roundtrip_ms"] or 999) < 60,
+         f"{r['roundtrip_ms']:.1f} ms"),
+    ]
+    width = max(len(n) for n, _, _ in checks)
+    failed = 0
+    for name, ok, detail in checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:<{width}}  {detail}")
+        failed += not ok
+    if failed:
+        print("\n  The virtual devices are not carrying the probe intact. Fix this\n"
+              "  before measuring a call, or the call will get the blame.")
+    else:
+        print("\n  Routing is good. The probe survives the virtual devices unchanged,\n"
+              "  so anything a real run shows is Discord's doing.")
+    return 1 if failed else 0
 
 
 def list_devices():
@@ -691,6 +747,8 @@ def main():
     sub.add_parser("setup", help="create the probe and capture sinks")
     sub.add_parser("teardown", help="remove them again")
     sub.add_parser("streams", help="list playback streams, to route the far end")
+    p = sub.add_parser("loopback", help="check the routing without involving a call")
+    p.add_argument("-o", "--out", default="loopback.wav")
 
     p = sub.add_parser("capture", help="play the probe and record the far end")
     p.add_argument("-s", "--signal", default="probe.wav")
@@ -732,6 +790,8 @@ def main():
         teardown()
     elif a.cmd == "streams":
         list_streams()
+    elif a.cmd == "loopback":
+        return loopback(a.out)
     elif a.cmd == "capture":
         capture(a.signal, a.out, a.play_target, a.record_target, a.seconds)
     elif a.cmd == "analyze":

@@ -51,14 +51,34 @@ python3 tools/roundtrip.py signal -o probe.wav
 python3 tools/roundtrip.py setup
 ```
 
-`setup` creates two virtual sinks: `stereocord_probe`, which the sending client
-listens to so the probe never goes near a real microphone, and
-`stereocord_capture`, where the receiving endpoint's audio is sent so the
-recording contains only the far end.
+`setup` creates two virtual sinks and one virtual microphone:
+
+| device | kind | purpose |
+| --- | --- | --- |
+| `stereocord_probe` | sink | the probe is played into this |
+| `stereocord_mic` | **source** | what the sending client listens to |
+| `stereocord_capture` | sink | the receiving endpoint's audio is routed here |
+
+`stereocord_mic` exists because a null sink's monitor, while technically a
+source, is hidden by most device pickers — desktop sound settings filter
+monitors out and a browser will not offer one as a microphone. Remapping the
+monitor produces a first-class input that applications list like any other mic.
+
+Check the wiring before involving a call:
+
+```bash
+python3 tools/roundtrip.py loopback
+```
+
+That sends the probe through the virtual devices and back with no call in the
+middle, so everything should come out unchanged: stereo, full bandwidth, and a
+delay of a few tens of milliseconds that is pure buffering. If this fails, fix
+it before measuring a call — otherwise the call gets the blame for a wiring
+mistake.
 
 In the **sending** client, Voice & Video:
 
-- Input Device → `Monitor of stereocord_probe`
+- Input Device → `stereocord_mic`
 - Noise Suppression **off** (Krisp will mangle a sweep into something unrecognisable)
 - Echo Cancellation, Automatic Gain Control, Advanced Voice Activity **off**
 - Input Mode → **Push to Talk**, and hold it for the whole 11 seconds
@@ -67,6 +87,11 @@ That last one matters more than it looks. With voice activity detection Discord
 gates the quiet parts of the sweep, so the low and high ends of the measured
 response are missing transmission rather than codec behaviour. Push-to-talk
 held down, or Input Sensitivity dragged fully left, avoids it.
+
+The **receiving** endpoint needs no device selection at all — its audio is moved
+with `pactl` rather than chosen in its settings. If it is Discord in a browser,
+the browser will still ask for microphone permission before it will join voice
+and enumerate devices; grant it and mute, or it will list nothing.
 
 Join the channel from both endpoints, then route the receiver:
 
