@@ -130,6 +130,21 @@ Finally:
 python3 tools/roundtrip.py teardown
 ```
 
+## Why parec and not pw-record
+
+Recording uses PulseAudio's tools rather than PipeWire's, deliberately. A
+monitor such as `stereocord_capture.monitor` is a PulseAudio name with no
+PipeWire node behind it — `pw-cli info stereocord_capture.monitor` reports
+"unknown global" — so `pw-record --target` cannot resolve it and falls back to
+the default source without saying so. Targeting the sink node instead records
+silence, because a monitor is a set of ports on that node rather than a source
+in its own right. `parec` resolves monitor names correctly.
+
+Both tools fall back silently on an unknown device, so `capture` checks the
+names against what PulseAudio actually offers before it starts, and warns when
+the default source is the probe microphone — that is the case where a fallback
+produces a file that looks like a flawless round trip.
+
 ## Sanity checks before you trust a run
 
 - Play `before.wav` back. You should hear the chirp and both sweeps. If it is

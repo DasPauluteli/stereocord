@@ -422,27 +422,50 @@ def teardown():
 
 
 def list_streams():
-    """Playback streams, so the receiving endpoint can be routed."""
-    out = _pactl("list", "sink-inputs", check=False)
-    index = app = None
-    rows = []
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("Sink Input #"):
-            if index is not None:
-                rows.append((index, app or "?"))
-            index, app = line.split("#")[1], None
-        elif line.startswith("application.name ="):
-            app = line.split("=", 1)[1].strip().strip('"')
-    if index is not None:
-        rows.append((index, app or "?"))
+    """Playback streams, so the receiving endpoint can be routed.
+
+    Shows which sink each one is on and what it is playing, because
+    "Chromium" alone does not distinguish a browser from Discord's own
+    Electron process, and routing the wrong one is silent and plausible.
+    """
+    sinks = {}
+    for line in _pactl("list", "short", "sinks", check=False).splitlines():
+        f = line.split("\t")
+        if len(f) > 1:
+            sinks[f[0]] = f[1]
+
+    rows, cur = [], None
+    for line in _pactl("list", "sink-inputs", check=False).splitlines():
+        s = line.strip()
+        if s.startswith("Sink Input #"):
+            if cur:
+                rows.append(cur)
+            cur = {"index": s.split("#")[1], "app": "?", "media": "", "sink": "?"}
+        elif cur is not None:
+            if s.startswith("Sink:"):
+                cur["sink"] = sinks.get(s.split(":", 1)[1].strip(), "?")
+            elif s.startswith("application.name ="):
+                cur["app"] = s.split("=", 1)[1].strip().strip('"')
+            elif s.startswith("media.name ="):
+                cur["media"] = s.split("=", 1)[1].strip().strip('"')[:34]
+    if cur:
+        rows.append(cur)
+
     if not rows:
-        print("  no playback streams; make sure the far end is actually making sound")
+        print("  no playback streams. The far end has to actually be making sound\n"
+              "  before it appears here - have it play something, or unmute briefly.")
         return
-    print("  index  application")
-    for idx, name in rows:
-        print(f"  {idx:>5}  {name}")
-    print(f"\n  pactl move-sink-input <index> {CAPTURE_SINK}")
+
+    print(f"  {'index':>5}  {'application':<22} {'playing':<34} currently on")
+    for r in rows:
+        mark = " <- already routed" if r["sink"] == CAPTURE_SINK else ""
+        print(f"  {r['index']:>5}  {r['app']:<22} {r['media']:<34} {r['sink']}{mark}")
+    print(f"""
+  Route the RECEIVING endpoint, not the sending Discord. "WEBRTC VoiceEngine"
+  is Discord's own desktop client - moving that one records the sender's
+  playback rather than the far end.
+
+  pactl move-sink-input <index> {CAPTURE_SINK}""")
 
 
 def loopback(tmp_wav):
@@ -508,30 +531,45 @@ def list_devices():
     )
 
 
-def _node_exists(name):
-    """Is this a real sink or source right now?"""
-    listing = (_pactl("list", "short", "sinks", check=False)
-               + _pactl("list", "short", "sources", check=False))
-    base = name[:-8] if name.endswith(".monitor") else name
-    return any(line.split("\t")[1] in (name, base)
-               for line in listing.splitlines() if "\t" in line)
+def _device_names(kind):
+    """Exact PulseAudio device names, which is what parec/paplay resolve."""
+    return {line.split("\t")[1]
+            for line in _pactl("list", "short", kind, check=False).splitlines()
+            if "\t" in line}
 
 
 def capture(signal_path, out_path, play_target, record_target, seconds):
-    # pw-record and pw-play fall back to the default device when a target does
-    # not resolve, silently, and the resulting file looks perfectly reasonable.
-    # That is how a measurement ends up describing the local soundcard.
-    for role, target in (("play", play_target), ("record", record_target)):
-        if target and not _node_exists(target):
+    # Both parec and paplay fall back to the default device when the one named
+    # does not resolve. They do it silently and still write a plausible file,
+    # which is how a measurement ends up describing the local soundcard. Match
+    # the names exactly against what PulseAudio actually offers.
+    for role, target, kind in (("play", play_target, "sinks"),
+                               ("record", record_target, "sources")):
+        if target and target not in _device_names(kind):
             raise SystemExit(
-                f"{role} target {target!r} does not exist.\n"
+                f"{role} device {target!r} does not exist.\n"
                 "Run 'roundtrip.py setup' first - and note that 'teardown' removes\n"
-                "these devices, so anything recorded after it goes to the default\n"
+                "these devices, so anything recorded afterwards goes to the default\n"
                 "device instead, which is not a measurement of anything.")
 
-    play = ["pw-play"] + (["--target", play_target] if play_target else []) + [signal_path]
-    rec = ["pw-record"] + (["--target", record_target] if record_target else []) + [
-        "--rate", str(SR), "--channels", "2", "--format", "s16", out_path,
+    # A fallback only looks convincing when the default source is carrying the
+    # probe, which is exactly the case after pointing a client at the virtual
+    # microphone. Say so, because the resulting file looks perfectly fine.
+    default_source = _pactl("get-default-source", check=False).strip()
+    if default_source == PROBE_SOURCE and record_target != PROBE_SOURCE:
+        print(f"  note: the default source is {PROBE_SOURCE}, which carries the probe.\n"
+              f"        If anything falls back to it the recording will look like a\n"
+              f"        clean round trip while never having left this machine.")
+
+    # PulseAudio's tools rather than PipeWire's: a monitor such as
+    # "stereocord_capture.monitor" is a PulseAudio name with no PipeWire node
+    # behind it, so pw-record cannot resolve it and falls back to the default
+    # source. Targeting the sink node instead records silence, because a
+    # monitor is a set of ports on that node rather than a source of its own.
+    play = ["paplay"] + (["--device=" + play_target] if play_target else []) + [signal_path]
+    rec = ["parec"] + (["--device=" + record_target] if record_target else []) + [
+        "--file-format=wav", "--format=s16le",
+        f"--rate={SR}", "--channels=2", out_path,
     ]
     print(f"recording -> {out_path}")
     recorder = subprocess.Popen(rec)
