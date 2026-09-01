@@ -1,3 +1,5 @@
+![stereocord — true stereo in Discord's Linux voice module](docs/social-preview.png)
+
 > **Warning**
 > This modifies Discord's client files, which is against Discord's terms of
 > service. Use at your own risk. Not affiliated with Discord Inc.
