@@ -198,19 +198,27 @@ before concluding the patch failed.
 python3 tools/roundtrip.py selftest
 ```
 
-Builds two synthetic recordings with known properties — a mono, band-limited,
-high-passed path versus a stereo, full-band, unfiltered one — runs the analysis
-over them, and checks the recovered numbers against what was injected. It exits
-non-zero if any check fails, so it is a test rather than a demonstration.
+Builds synthetic recordings with known properties, runs the analysis over them,
+and checks the recovered numbers against what was injected. It exits non-zero if
+any check fails, so it is a test rather than a demonstration.
+
+The two charted cases stand in for a stock and a patched client, and are shaped
+like the round trip actually measured between two desktop clients: both full
+band, differing in channel count and in the low end, with the stock arm's
+high-pass steep enough to reproduce the -40 dB the real one takes out below
+100 Hz. A third case, `narrowband`, is band-limited to 7.8 kHz and is not
+charted; it exists so the bandwidth measurement has a known cutoff to recover,
+which the charted pair no longer provides.
 
 ```
-PASS  before delay recovered            92.0 ms, injected 92
-PASS  after delay recovered             88.0 ms, injected 88
-PASS  mono path reads as mono           correlation 1.0000
-PASS  stereo path reads as stereo       correlation -0.0038
-PASS  band-limited path reads narrower  11309 Hz vs 20000 Hz
-PASS  high-passed path loses low end    -6.7 dB
-PASS  unfiltered path keeps low end     +0.0 dB
+PASS  before delay recovered              239.0 ms, injected 239
+PASS  after delay recovered               234.0 ms, injected 234
+PASS  mono path reads as mono             correlation 1.0000
+PASS  stereo path reads as stereo         correlation -0.0038
+PASS  full-band paths read full band      20000 Hz and 20000 Hz
+PASS  band-limited path reads its cutoff  11309 Hz, injected 11439
+PASS  high-passed path loses low end      -38.9 dB
+PASS  unfiltered path keeps low end       -0.0 dB
 ```
 
 It also regenerates the chart below:
@@ -218,4 +226,5 @@ It also regenerates the chart below:
 ![self-test](roundtrip-selftest.png)
 
 This chart is a test of the measurement code. It is **not** a Discord
-measurement, and no numbers in this repository are presented as one.
+measurement, however closely it resembles one — the real capture is the chart
+at the top of the README, taken with the procedure above.

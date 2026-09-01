@@ -698,8 +698,14 @@ def chart(before, after, out_path, title):
 # self-test
 # --------------------------------------------------------------------------
 
-def _shape(x, lp=None, hp=None, sr=SR):
-    """Apply a low-pass and/or high-pass in the frequency domain."""
+def _shape(x, lp=None, hp=None, hp_order=2, floor_db=None, sr=SR):
+    """Apply a low-pass and/or high-pass in the frequency domain.
+
+    `hp_order` sets how abruptly the high-pass falls: a stock client's low end
+    does not slope away gently, it drops off a cliff. `floor_db` caps how deep
+    the attenuation goes, because a real path bottoms out on the codec's own
+    residual rather than continuing down forever.
+    """
     n = len(x)
     X = np.fft.rfft(x)
     f = np.fft.rfftfreq(n, 1 / sr)
@@ -707,11 +713,14 @@ def _shape(x, lp=None, hp=None, sr=SR):
     if lp:
         H *= 1 / np.sqrt(1 + (f / lp) ** 12)
     if hp:
-        H *= (f / hp) ** 2 / np.sqrt(1 + (f / hp) ** 4)
+        H *= (f / hp) ** hp_order / np.sqrt(1 + (f / hp) ** (2 * hp_order))
+    if floor_db is not None:
+        H = np.maximum(H, 10 ** (floor_db / 20))
     return np.fft.irfft(X * H, n)
 
 
-def _simulate(delay_ms, mono, lp, hp, noise=2e-4, sr=SR):
+def _simulate(delay_ms, mono, lp=None, hp=None, hp_order=2, floor_db=None,
+              noise=2e-4, sr=SR):
     """A recording of the probe through a path with known properties."""
     ref = build_signal()
     d = int(delay_ms / 1000 * sr)
@@ -720,25 +729,42 @@ def _simulate(delay_ms, mono, lp, hp, noise=2e-4, sr=SR):
     if mono:
         m = (left + right) / 2
         left = right = m
-    out[d:, 0] = _shape(left, lp, hp, sr)
-    out[d:, 1] = _shape(right, lp, hp, sr)
+    kw = dict(lp=lp, hp=hp, hp_order=hp_order, floor_db=floor_db, sr=sr)
+    out[d:, 0] = _shape(left, **kw)
+    out[d:, 1] = _shape(right, **kw)
     return out + np.random.default_rng(7).normal(0, noise, out.shape)
 
 
-# Two paths standing in for a stock and a patched client: folded to mono with
-# hybrid-mode bandwidth and an active high-pass, versus stereo, full band, no
-# high-pass.
+# The "before" and "after" cases stand in for a stock and a patched client, and
+# are shaped to resemble the round trip actually measured between two desktop
+# clients (docs/roundtrip.png): both arms full band, differing in channels and
+# in the low end. The stock arm's high-pass is steep and deep because the real
+# one is - the measured capture reads -40.5 dB below 100 Hz with the passband
+# intact by ~150 Hz, which these numbers reproduce to within 2 dB.
+#
+# The earlier "before" here also band-limited to 7.8 kHz, on the assumption
+# that a stock client falls back to a hybrid mode. The real one did not: it ran
+# full band and only the channels and the low end changed. That assumption is
+# now confined to `narrowband`, which is not charted and exists only to give
+# the bandwidth measurement a known cutoff to recover.
 SELFTEST_CASES = {
-    "before": dict(delay_ms=92, mono=True, lp=7800, hp=85),
-    "after": dict(delay_ms=88, mono=False, lp=19500, hp=None),
+    "before": dict(delay_ms=239, mono=True, hp=92, hp_order=12, floor_db=-51),
+    "after": dict(delay_ms=234, mono=False),
+    "narrowband": dict(delay_ms=239, mono=True, lp=7800),
 }
+
+# Where a 12th-order low-pass at `lp` crosses the -20 dB line `rolloff` looks
+# for: |H| = 1/sqrt(1 + (f/lp)^12) = 0.1 at f = lp * 99^(1/12).
+NARROWBAND_CUTOFF_HZ = SELFTEST_CASES["narrowband"]["lp"] * 99 ** (1 / 12)
 
 
 def selftest(out_dir, keep):
     """Check the analysis against recordings whose properties are known.
 
     This validates the measurement code. It says nothing about Discord, and
-    the chart it produces is not a Discord measurement.
+    the chart it produces is not a Discord measurement - the two charted cases
+    are shaped like the capture in docs/roundtrip.png so the comparison is not
+    misleading, but the numbers in them were put there by hand.
     """
     import os
 
@@ -751,23 +777,31 @@ def selftest(out_dir, keep):
         if not keep:
             os.remove(wav)
 
-    b, a = results["before"], results["after"]
+    b, a, nb = results["before"], results["after"], results["narrowband"]
+    b_ms = SELFTEST_CASES["before"]["delay_ms"]
+    a_ms = SELFTEST_CASES["after"]["delay_ms"]
+    cut = NARROWBAND_CUTOFF_HZ
     checks = [
         ("before delay recovered",
-         abs(b["roundtrip_ms"] - 92) < 2, f"{b['roundtrip_ms']:.1f} ms, injected 92"),
+         abs(b["roundtrip_ms"] - b_ms) < 2,
+         f"{b['roundtrip_ms']:.1f} ms, injected {b_ms}"),
         ("after delay recovered",
-         abs(a["roundtrip_ms"] - 88) < 2, f"{a['roundtrip_ms']:.1f} ms, injected 88"),
+         abs(a["roundtrip_ms"] - a_ms) < 2,
+         f"{a['roundtrip_ms']:.1f} ms, injected {a_ms}"),
         ("mono path reads as mono",
          b["channel_correlation"] > 0.9 and not b["stereo"],
          f"correlation {b['channel_correlation']:.4f}"),
         ("stereo path reads as stereo",
          abs(a["channel_correlation"]) < 0.1 and a["stereo"],
          f"correlation {a['channel_correlation']:.4f}"),
-        ("band-limited path reads narrower",
-         a["bandwidth_hz"] > b["bandwidth_hz"],
-         f"{b['bandwidth_hz']:.0f} Hz vs {a['bandwidth_hz']:.0f} Hz"),
+        ("full-band paths read full band",
+         b["bandwidth_hz"] == PROBE_TOP_HZ and a["bandwidth_hz"] == PROBE_TOP_HZ,
+         f"{b['bandwidth_hz']:.0f} Hz and {a['bandwidth_hz']:.0f} Hz"),
+        ("band-limited path reads its cutoff",
+         abs(nb["bandwidth_hz"] - cut) / cut < 0.05,
+         f"{nb['bandwidth_hz']:.0f} Hz, injected {cut:.0f}"),
         ("high-passed path loses low end",
-         b["low_freq_db"] < -3.0, f"{b['low_freq_db']:+.1f} dB"),
+         b["low_freq_db"] < -30.0, f"{b['low_freq_db']:+.1f} dB"),
         ("unfiltered path keeps low end",
          abs(a["low_freq_db"]) < 1.0, f"{a['low_freq_db']:+.1f} dB"),
     ]

@@ -94,10 +94,15 @@ signal are mono however many channels the container claims.
 The second chart is **a simulation, not a Discord capture** — it says nothing
 about any particular Discord build, and is here only to show that the analysis
 behind the first chart works. It is the output of `python3
-tools/roundtrip.py selftest`, which runs the same analysis over two synthetic
-recordings with known properties — one folded to mono, band-limited and
-high-passed, one stereo, full-band and unfiltered — and checks that the
-measurement code recovers what was put in.
+tools/roundtrip.py selftest`, which runs the same analysis over synthetic
+recordings with known properties — one folded to mono and steeply high-passed,
+one stereo and unfiltered — and checks that the measurement code recovers what
+was put in.
+
+The two charted cases are shaped like the capture above, so the pair should
+look alike: full band on both arms, differing in channel count and in the low
+end. A third case, not charted, is band-limited to 7.8 kHz to give the
+bandwidth measurement a known cutoff to recover.
 
 ## Which clients can hear it
 
