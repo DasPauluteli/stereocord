@@ -871,7 +871,7 @@ on separate machines: the probe goes into the sending client, out through
 Discord's servers, and is recorded at the receiving end. Only the sender is
 patched — the receiving client is a stock, unmodified install. Measured with
 [`tools/roundtrip.py`](tools/roundtrip.py); see
-[docs/measuring.md](docs/measuring.md) for the procedure.
+[the wiki](https://github.com/DasPauluteli/stereocord/wiki/Measuring) for the procedure.
 
 ![before and after]({rel})
 

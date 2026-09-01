@@ -73,7 +73,7 @@ on separate machines: the probe goes into the sending client, out through
 Discord's servers, and is recorded at the receiving end. Only the sender is
 patched — the receiving client is a stock, unmodified install. Measured with
 [`tools/roundtrip.py`](tools/roundtrip.py); see
-[docs/measuring.md](docs/measuring.md) for the procedure.
+[the wiki](https://github.com/DasPauluteli/stereocord/wiki/Measuring) for the procedure.
 
 ![before and after](docs/roundtrip.png)
 
@@ -127,8 +127,10 @@ measurement: the result comes back mono and looks like the patch failed.
 
 ## Documentation
 
-- [docs/how-it-works.md](docs/how-it-works.md) — how sites are located and validated, and what the injected filters do
-- [docs/measuring.md](docs/measuring.md) — measuring the round trip through a real call
+The long-form documentation lives in [the wiki](https://github.com/DasPauluteli/stereocord/wiki):
+
+- [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works) — how sites are located and validated, and what the injected filters do
+- [Measuring](https://github.com/DasPauluteli/stereocord/wiki/Measuring) — measuring the round trip through a real call
 
 ## How it differs from the original
 
@@ -195,7 +197,7 @@ inlined form), the `OpusEncoder` struct shifted by 4 bytes (hence wildcarded
 field displacements in the CELT signatures), libopus gained
 `opus_encode_frame_native`, and `hp_cutoff` / `dc_reject` are inlined into it.
 That leaves no function to replace, so both filters are handled differently
-there — see [docs/how-it-works.md](docs/how-it-works.md).
+there — see [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works).
 
 Sites are marked critical or not. The critical ones decide whether audio is mono
 or stereo; the rest are quality refinements (bitrate, framing, CELT, filter
@@ -210,7 +212,7 @@ The patch changes an encoder configuration; whether that reaches the person
 listening is a separate question. `tools/roundtrip.py` sends a known probe
 through a real call and measures what comes back — round-trip delay, L/R
 correlation (the mono-versus-stereo test), effective bandwidth, and low-end
-attenuation. See [docs/measuring.md](docs/measuring.md).
+attenuation. See [Measuring](https://github.com/DasPauluteli/stereocord/wiki/Measuring).
 
 It needs a second endpoint in the call, because a client does not decode its own
 transmission — and that endpoint has to be a Discord **desktop** client on
