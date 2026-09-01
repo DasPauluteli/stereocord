@@ -42,7 +42,20 @@ impl Plan {
 }
 
 /// Turn resolved offsets into the bytes that will be written.
-pub fn build(report: &Report, cfg: &Config) -> Plan {
+/// Resolve a RIP-relative operand: `offset` points at the disp32, which is
+/// relative to the end of the instruction it belongs to.
+fn rip_target(data: &[u8], disp_at: usize) -> Option<usize> {
+    let bytes = data.get(disp_at..disp_at + 4)?;
+    let disp = i32::from_le_bytes(bytes.try_into().ok()?);
+    let next_insn = disp_at + 4;
+    let target = next_insn as i64 + disp as i64;
+    if target < 0 || target as usize + 4 > data.len() {
+        return None;
+    }
+    Some(target as usize)
+}
+
+pub fn build(report: &Report, cfg: &Config, data: &[u8]) -> Plan {
     let bitrate = cfg.bitrate_bps().to_le_bytes().to_vec();
     let mut edits = Vec::new();
 
@@ -65,6 +78,15 @@ pub fn build(report: &Report, cfg: &Config) -> Plan {
                 }
                 Action::ShellcodeHpCutoff => shellcode::hp_cutoff(cfg.gain),
                 Action::ShellcodeDcReject => shellcode::dc_reject(cfg.gain),
+                Action::RipRelF32(v) => v.to_le_bytes().to_vec(),
+            };
+            // A RIP-relative site patches the constant, not the instruction.
+            let offset = match site.action {
+                Action::RipRelF32(_) => match rip_target(data, offset) {
+                    Some(t) => t,
+                    None => continue,
+                },
+                _ => offset,
             };
             edits.push(Edit {
                 site: site.name,
@@ -167,10 +189,11 @@ pub enum State {
     Stock,
     /// Carries this tool's injected filters.
     Stereocord,
-    /// Modified, but not by this tool — most likely by the upstream project's
-    /// script, whose filter injection is a compiled C++ function body rather
-    /// than the byte sequence emitted here.
-    Foreign,
+    /// Patched, by something. Which tool cannot be told apart: the injected
+    /// filters are the only distinctive fingerprint, and on builds that inline
+    /// them there is nothing to inject, so a module this tool patched looks
+    /// exactly like one the upstream script patched.
+    Patched,
 }
 
 impl std::fmt::Display for State {
@@ -178,7 +201,7 @@ impl std::fmt::Display for State {
         match self {
             State::Stock => write!(f, "stock"),
             State::Stereocord => write!(f, "patched by stereocord"),
-            State::Foreign => write!(f, "already patched, but not by stereocord"),
+            State::Patched => write!(f, "already patched (by this tool or a compatible one)"),
         }
     }
 }
@@ -196,6 +219,8 @@ pub fn classify(data: &[u8], report: &Report) -> State {
     {
         return State::Stereocord;
     }
+    // Without the injected filters there is no fingerprint, so the most that
+    // can be said is that someone has been here.
     for site in SITES {
         if site.stock.is_empty() {
             continue;
@@ -204,7 +229,7 @@ pub fn classify(data: &[u8], report: &Report) -> State {
         for &offset in &resolved.offsets {
             let end = offset + site.stock.len();
             if end <= data.len() && &data[offset..end] != site.stock {
-                return State::Foreign;
+                return State::Patched;
             }
         }
     }

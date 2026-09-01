@@ -282,6 +282,19 @@ fn cmd_scan(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// A missing site that the build genuinely does not need, and why.
+///
+/// Returns the explanation when absence is fine, `None` when it is a real gap.
+fn excused(name: &str, report: &resolve::Report) -> Option<&'static str> {
+    let site = sites::find(name)?;
+    let absent = site.absent_ok.as_ref()?;
+    match absent.covered_by {
+        // Only excused if whatever covers it actually resolved.
+        Some(other) => report.resolved(other).map(|_| absent.note),
+        None => Some(absent.note),
+    }
+}
+
 fn newest_per_channel(installs: &[Install]) -> Vec<String> {
     let mut seen: Vec<String> = Vec::new();
     let mut out = Vec::new();
@@ -342,11 +355,13 @@ fn report_sites(node: &Path, verbose: bool) -> Result<(), String> {
     let report = resolve::resolve_all(&data, syms.as_ref());
     let state = patch::classify(&data, &report);
     println!("  status: {state}");
-    if state == patch::State::Foreign {
+    let mut excused_count = 0usize;
+    if state == patch::State::Patched {
         println!(
             "  Most sites will read as MISSING below: their original instructions\n  \
-             have been overwritten, so there is nothing left to match. Restore the\n  \
-             stock module before patching."
+             have been overwritten, so there is nothing left to match. That is\n  \
+             expected for a patched module, not a fault. To re-scan properly, or to\n  \
+             re-patch, run 'stereocord restore' first."
         );
     }
     let mut ok = 0;
@@ -372,10 +387,24 @@ fn report_sites(node: &Path, verbose: bool) -> Result<(), String> {
             Some(Outcome::Ambiguous { found, wanted }) => {
                 println!("  AMBIG   {name:<30} matched {found} times, expected {wanted}");
             }
-            _ => println!("  MISSING {name:<30} no signature matched"),
+            _ => match excused(name, &report) {
+                Some(note) => {
+                    excused_count += 1;
+                    println!("  n/a     {name:<30} {note}");
+                }
+                None => println!("  MISSING {name:<30} no signature matched"),
+            },
         }
     }
-    println!("  {ok}/{} sites located", report.order.len());
+    let gaps = report.order.len() - ok - excused_count;
+    print!("  {ok}/{} sites located", report.order.len());
+    if excused_count > 0 {
+        print!(", {excused_count} not needed on this build");
+    }
+    if gaps > 0 {
+        print!(", {gaps} missing");
+    }
+    println!();
     Ok(())
 }
 
@@ -481,7 +510,12 @@ fn patch_one(
     let syms = elf::symbols(&data);
     let report = resolve::resolve_all(&data, syms.as_ref());
     let missing = report.missing();
-    let critical_missing: Vec<&str> = missing
+    let real_missing: Vec<&str> = missing
+        .iter()
+        .copied()
+        .filter(|n| excused(n, &report).is_none())
+        .collect();
+    let critical_missing: Vec<&str> = real_missing
         .iter()
         .copied()
         .filter(|n| sites::find(n).map(|s| s.critical).unwrap_or(true))
@@ -489,6 +523,10 @@ fn patch_one(
     if !missing.is_empty() {
         println!("  {} of {} sites located", report.order.len() - missing.len(), report.order.len());
         for name in &missing {
+            if let Some(note) = excused(name, &report) {
+                println!("    n/a     {name} - {note}");
+                continue;
+            }
             match report.outcomes.get(name) {
                 Some(Outcome::Ambiguous { found, wanted }) => {
                     println!("    AMBIG   {name} (matched {found}, expected {wanted})")
@@ -506,10 +544,14 @@ fn patch_one(
             return Ok(false);
         }
         if critical_missing.is_empty() {
-            println!(
-                "  All stereo-critical sites resolved; the missing ones are quality\n  \
-                 refinements (bitrate, framing, CELT, filter bypass). Proceeding."
-            );
+            if real_missing.is_empty() {
+                println!("  Everything this build needs resolved. Proceeding.");
+            } else {
+                println!(
+                    "  All stereo-critical sites resolved; the rest are quality\n  \
+                     refinements (bitrate, framing, CELT, filter bypass). Proceeding."
+                );
+            }
         } else {
             println!("  --allow-partial given; applying the sites that did resolve");
         }
@@ -517,7 +559,7 @@ fn patch_one(
         println!("  all {} sites located", report.order.len());
     }
 
-    let plan = patch::build(&report, cfg);
+    let plan = patch::build(&report, cfg, &data);
     let errors = patch::check(&plan, &data);
     if !errors.is_empty() {
         for e in &errors {
@@ -551,21 +593,21 @@ fn patch_one(
     if has("celt") {
         effects.push("CELT".to_string());
     }
-    // The filter group has three members; the two Opus injections are the ones
-    // that make the result "filterless". Say which of them actually landed.
-    let injected = plan
-        .edits
-        .iter()
-        .filter(|e| e.site == "HpCutoff_Inject" || e.site == "DcReject_Inject")
-        .count();
-    if injected == 2 {
+    // "Filterless" means both Opus input filters are out of the path. That can
+    // happen three ways per filter: the function was replaced, its coefficient
+    // was neutralised, or the build cannot reach it at all. Count all three,
+    // otherwise a fully-bypassed build reports as a partial one.
+    let applied = |name: &str| plan.edits.iter().any(|e| e.site == name);
+    let hp_done = applied("HpCutoff_Inject") || excused("HpCutoff_Inject", &report).is_some();
+    let dc_done = applied("DcReject_Inject") || applied("DcReject_Coefficient");
+    if hp_done && dc_done {
         effects.push(if cfg.gain != 1.0 {
             format!("filters bypassed (gain x{})", cfg.gain)
         } else {
             "filters bypassed".to_string()
         });
     } else if has("filter") {
-        effects.push("high-pass bypassed (opus filters not injected)".to_string());
+        effects.push("high-pass bypassed (opus filters still active)".to_string());
     }
     println!(
         "  {} edits, {} bytes: {}",

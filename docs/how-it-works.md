@@ -100,6 +100,37 @@ ret
 Both replacements are around 92 bytes against function bodies of 400+, so the
 tail of the original is simply left as unreachable code.
 
+## When the filters are inlined
+
+Newer builds (1.0.155 onward) inline both filters into
+`opus_encode_frame_native`, leaving no function to replace. Neither needs one.
+
+**`hp_cutoff` is unreachable.** libopus only calls it in VOIP mode:
+
+```c
+if (st->application == OPUS_APPLICATION_VOIP)
+   hp_cutoff(pcm, cutoff_Hz, ...);
+else
+   dc_reject(pcm, 3, ...);
+```
+
+which compiles to a `cmp DWORD PTR [r12+0x70], 0x800` followed by a `jne` past
+the inlined `hp_cutoff`. The `OpusConfig_Application` patch selects kAudio, so
+that branch is never taken and there is nothing left to bypass.
+
+**`dc_reject` is neutralised through its coefficient.** It computes
+`coef = 6.3 * cutoff_Hz / Fs`, then `coef2 = 1 - coef`, and runs
+`out = x - m` with `m = coef*x + coef2*m`. The compiler folds `6.3 * 3` into a
+single `float` constant of 18.9 in `.rodata`, loaded by exactly one
+instruction. Writing 0.0 there gives `coef = 0` and `coef2 = 1`, so `m` never
+leaves its initial zero and the filter passes the signal through unchanged.
+
+One four-byte constant replaces an entire injected function, and it is located
+by following the RIP-relative displacement of the `movss` that loads it rather
+than by a fixed offset. What the original approach needed 92 bytes of injected
+code and a compiler to achieve, this does with a single float — on the builds
+where the old approach cannot work at all.
+
 ## Interaction with Discord's updater
 
 Discord ships voice-module updates as binary deltas and verifies the SHA-256 of

@@ -27,6 +27,9 @@ pub enum Action {
     ShellcodeHpCutoff,
     /// Overwrite with the injected filter replacement.
     ShellcodeDcReject,
+    /// The resolved offset holds the disp32 of a RIP-relative operand; follow
+    /// it and write this f32 at the target instead of at the offset itself.
+    RipRelF32(f32),
 }
 
 /// How many matches a site expects, and how to pick if there are several.
@@ -43,6 +46,18 @@ pub enum Expect {
     NearestAfter { anchor: &'static str, window: usize },
 }
 
+/// Why a site can be legitimately absent from a build, and what covers it.
+///
+/// Reported instead of a bare MISSING. Without this, a build that simply does
+/// not need a patch looks identical to one whose code has moved, which
+/// overstates how badly the catalogue has aged.
+pub struct Absent {
+    /// When this other site is applied, the missing one is unnecessary.
+    /// `None` means the site is never needed for stereo on any build.
+    pub covered_by: Option<&'static str>,
+    pub note: &'static str,
+}
+
 pub struct Site {
     pub name: &'static str,
     pub group: &'static str,
@@ -54,6 +69,8 @@ pub struct Site {
     /// code can still be patched usefully, which matters because Discord keeps
     /// shipping new builds.
     pub critical: bool,
+    /// Set when absence is not a failure. See [`Absent`].
+    pub absent_ok: Option<Absent>,
     pub expect: Expect,
     /// The function this site lives in, by symbol name; alternatives are tried
     /// in order. When one resolves, the patterns below are searched only inside
@@ -117,6 +134,7 @@ pub static SITES: &[Site] = &[
         // via `cmovae`. Comparing against 0 instead makes the branch always
         // taken, so the offer always advertises stereo.
         critical: true,
+        absent_ok: None,
         expect: Expect::All(2),
         symbols: &[],
         entry: false,
@@ -135,6 +153,7 @@ pub static SITES: &[Site] = &[
         // `cmp r12, rN` / `cmovae r12, rN` clamps the channel count down to
         // whatever the device reports. Replaced with `mov r12, 2`.
         critical: true,
+        absent_ok: None,
         expect: Expect::NearestAfter { anchor: "SelectSampleRate_48k", window: 0x60 },
         symbols: &[SYM_CREATE_AUDIO_FRAME],
         entry: false,
@@ -155,6 +174,7 @@ pub static SITES: &[Site] = &[
         group: "stereo",
         what: "skip the capture-side mono downmix",
         critical: true,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_CAPTURED_AUDIO_PROCESS],
         entry: false,
@@ -173,6 +193,7 @@ pub static SITES: &[Site] = &[
         group: "stereo",
         what: "channel downmix helper returns immediately",
         critical: true,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &["downmix_and_resample"],
         entry: true,
@@ -189,6 +210,7 @@ pub static SITES: &[Site] = &[
         group: "stereo",
         what: "AudioEncoderOpusConfig::num_channels = 2",
         critical: true,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_OPUS_CONFIG_CTOR],
         entry: false,
@@ -202,6 +224,12 @@ pub static SITES: &[Site] = &[
         group: "stereo",
         what: "AudioEncoderMultiChannelOpusConfig::num_channels = 2",
         critical: false,
+        absent_ok: Some(Absent {
+            covered_by: None,
+            note: "multi-channel (surround) Opus config, not used for stereo voice; \
+                   newer builds derive the channel count from the SDP rather than \
+                   from a constant, so there is no immediate to patch",
+        }),
         expect: Expect::One,
         symbols: &[SYM_MULTICHANNEL_CTOR],
         entry: false,
@@ -219,6 +247,7 @@ pub static SITES: &[Site] = &[
         // 48000 makes both arms agree. The two encodings differ only in which
         // registers the build happened to allocate.
         critical: true,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_CREATE_AUDIO_FRAME],
         entry: false,
@@ -236,6 +265,7 @@ pub static SITES: &[Site] = &[
         group: "bitrate",
         what: "AudioEncoderOpusConfig default bitrate",
         critical: false,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_OPUS_CONFIG_CTOR],
         entry: false,
@@ -249,6 +279,10 @@ pub static SITES: &[Site] = &[
         group: "bitrate",
         what: "AudioEncoderMultiChannelOpusConfig default bitrate",
         critical: false,
+        absent_ok: Some(Absent {
+            covered_by: None,
+            note: "multi-channel (surround) Opus config, not used for stereo voice",
+        }),
         expect: Expect::One,
         symbols: &[SYM_MULTICHANNEL_CTOR],
         entry: false,
@@ -267,6 +301,7 @@ pub static SITES: &[Site] = &[
         // upstream Windows script needed. Anchored on the request constant
         // 4002 so it still resolves after the prologue has been overwritten.
         critical: false,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &["WebRtcOpus_SetBitRate"],
         entry: false,
@@ -284,6 +319,7 @@ pub static SITES: &[Site] = &[
         group: "opus",
         what: "10 ms frames",
         critical: false,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_OPUS_CONFIG_CTOR],
         entry: false,
@@ -297,6 +333,7 @@ pub static SITES: &[Site] = &[
         group: "opus",
         what: "OPUS_APPLICATION_AUDIO instead of VOIP",
         critical: false,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_OPUS_CONFIG_CTOR],
         entry: false,
@@ -312,6 +349,7 @@ pub static SITES: &[Site] = &[
         // Otherwise the 248 kbps / 2 channel / 10 ms combination is rejected
         // before it reaches the encoder.
         critical: true,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_OPUS_CONFIG_ISOK],
         entry: true,
@@ -331,6 +369,7 @@ pub static SITES: &[Site] = &[
         // `OPUS_AUTO` (-1000) would let the encoder drop into SILK or hybrid
         // at low rates, which is where the low-pass and mono folding come from.
         critical: false,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &["opus_encoder_init"],
         entry: false,
@@ -350,6 +389,7 @@ pub static SITES: &[Site] = &[
         group: "celt",
         what: "initial st->mode = MODE_CELT_ONLY",
         critical: false,
+        absent_ok: None,
         expect: Expect::NearestAfter { anchor: "CELT_Force", window: 0x400 },
         symbols: &["opus_encoder_init"],
         entry: false,
@@ -367,6 +407,7 @@ pub static SITES: &[Site] = &[
         group: "filter",
         what: "WebRTC high-pass filter returns immediately",
         critical: false,
+        absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_HIGHPASS_PROCESS],
         entry: true,
@@ -383,6 +424,11 @@ pub static SITES: &[Site] = &[
         group: "filter",
         what: "opus hp_cutoff replaced with a pass-through",
         critical: false,
+        absent_ok: Some(Absent {
+            covered_by: Some("OpusConfig_Application"),
+            note: "libopus calls hp_cutoff only in VOIP mode; the application patch \
+                   selects kAudio, so it is never reached",
+        }),
         expect: Expect::One,
         symbols: &["hp_cutoff"],
         entry: true,
@@ -392,10 +438,45 @@ pub static SITES: &[Site] = &[
         expect_orig: &[&[0x55, 0x48, 0x89, 0xE5]],
     },
     Site {
+        name: "DcReject_Coefficient",
+        group: "filter",
+        what: "opus dc_reject coefficient forced to 0 (pass-through)",
+        // For builds that inline dc_reject, where there is no function left to
+        // replace. libopus computes `coef = 6.3 * cutoff_Hz / Fs` and then
+        // `out = x - m`, `m = coef*x + coef2*m` with `coef2 = 1 - coef`.
+        // Zeroing the numerator gives coef = 0 and coef2 = 1, so `m` never
+        // leaves its initial zero and the filter passes the signal through.
+        // One four-byte constant instead of a whole injected function.
+        critical: false,
+        absent_ok: Some(Absent {
+            covered_by: Some("DcReject_Inject"),
+            note: "dc_reject is a real function in this build and is replaced \
+                   outright, so its coefficient does not need neutralising",
+        }),
+        expect: Expect::One,
+        symbols: &["opus_encode_frame_native"],
+        entry: false,
+        // Anchored on the coefficient computation itself: cvtsi2ss of Fs,
+        // divide the constant by it, subtract from 1.
+        patterns: &[(
+            "F3 0F 2A ?? F3 0F 10 0D ?? ?? ?? ?? F3 0F 5E C8 F3 0F 10 15 ?? ?? ?? ?? F3 0F 5C D1",
+            8,
+        )],
+        action: Action::RipRelF32(0.0),
+        stock: &[],
+        // The constant is 6.3*3 = 18.9 stock, or 0.0 once patched.
+        expect_orig: &[&[0x34, 0x33, 0x97, 0x41], &[0x00, 0x00, 0x00, 0x00]],
+    },
+    Site {
         name: "DcReject_Inject",
         group: "filter",
         what: "opus dc_reject replaced with a pass-through",
         critical: false,
+        absent_ok: Some(Absent {
+            covered_by: Some("DcReject_Coefficient"),
+            note: "dc_reject is inlined in this build; its coefficient is zeroed \
+                   instead, which makes it pass through",
+        }),
         expect: Expect::One,
         symbols: &["dc_reject"],
         entry: true,

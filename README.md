@@ -116,18 +116,24 @@ the newest install per channel that has a module.
 
 | Build | Sites | Notes |
 | --- | --- | --- |
-| Stable 1.0.155 | 14/18 | all 7 stereo-critical sites resolve |
-| Stable 1.0.153 | 18/18 | |
-| Stable 0.0.128–0.0.135 | 18/18 | includes the build upstream last targeted, where every resolved offset matches its hardcoded table exactly |
-| Stable 0.0.109, Canary 0.0.783 | 17/18 | mono-downmix site predates the code shape |
+| Stable 1.0.155 | 15/19 + 4 n/a | fully covered |
+| Stable 1.0.153 | 18/19 + 1 n/a | fully covered |
+| Stable 0.0.128–0.0.135 | 18/19 + 1 n/a | includes the build upstream last targeted, where every resolved offset matches its hardcoded table exactly |
+| Stable 0.0.109, Canary 0.0.783 | 17/19 | mono-downmix site predates the code shape |
 
-1.0.155 rebuilt a good deal of the audio path: both Opus config constructors are
+Not every site applies to every build, and "n/a" is different from "missing".
+A site marked n/a is one this build does not need — either because another
+patch already covers it, or because the construct it targets does not exist
+here. Reporting those as failures would overstate how badly the catalogue has
+aged.
+
+1.0.155 rebuilt a good deal of the audio path. Both Opus config constructors are
 inlined into their callers' stack frames (hence a second signature for the
 inlined form), the `OpusEncoder` struct shifted by 4 bytes (hence wildcarded
-field displacements in the CELT signatures), and `hp_cutoff` / `dc_reject` are
-inlined away entirely — there is no longer a function to replace, so the two
-filter injections cannot be applied on that build. The WebRTC high-pass bypass
-still applies.
+field displacements in the CELT signatures), libopus gained
+`opus_encode_frame_native`, and `hp_cutoff` / `dc_reject` are inlined into it.
+That leaves no function to replace, so both filters are handled differently
+there — see [docs/how-it-works.md](docs/how-it-works.md).
 
 Sites are marked critical or not. The critical ones decide whether audio is mono
 or stereo; the rest are quality refinements (bitrate, framing, CELT, filter
