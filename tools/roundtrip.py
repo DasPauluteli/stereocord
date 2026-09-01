@@ -22,6 +22,9 @@ inside one client, because a client does not decode its own transmission.
 Subcommands:
   signal    write the test signal to a WAV
   selftest  validate the analysis against signals with known properties
+  setup     create the virtual sinks a measurement needs
+  streams   list playback streams, to route the receiving endpoint
+  teardown  remove the virtual sinks
   devices   list PipeWire nodes, to find capture/playback targets
   capture   play the signal and record the far end simultaneously
   analyze   turn one recording into measurements (JSON)
@@ -302,6 +305,92 @@ def analyze(rec_path, label):
 # capture
 # --------------------------------------------------------------------------
 
+PROBE_SINK = "stereocord_probe"
+CAPTURE_SINK = "stereocord_capture"
+
+
+def _pactl(*args, check=True):
+    return subprocess.run(["pactl", *args], capture_output=True, text=True,
+                          check=check).stdout
+
+
+def _module_ids():
+    """Module ids of the null sinks this script created."""
+    ids = []
+    for line in _pactl("list", "short", "modules", check=False).splitlines():
+        if "module-null-sink" in line and (PROBE_SINK in line or CAPTURE_SINK in line):
+            ids.append(line.split()[0])
+    return ids
+
+
+def setup():
+    """Create the two virtual sinks a measurement needs.
+
+    One is what the sending client listens to, so the probe reaches Discord
+    without going near a real microphone. The other is where the receiving
+    endpoint's audio is sent, so the recording contains only the far end and
+    not whatever else the machine happens to be playing.
+    """
+    existing = _pactl("list", "short", "sinks", check=False)
+    for name in (PROBE_SINK, CAPTURE_SINK):
+        if name in existing:
+            print(f"  {name} already exists")
+            continue
+        _pactl("load-module", "module-null-sink", f"sink_name={name}",
+               f"sink_properties=device.description={name}")
+        print(f"  created {name}")
+    print(f"""
+Now, in the SENDING Discord (the patched desktop client):
+  Voice & Video -> Input Device -> "Monitor of {PROBE_SINK}"
+  Turn OFF noise suppression, echo cancellation and automatic gain control.
+  Set Input Mode to Push to Talk and hold it during the capture, or drag
+  Input Sensitivity fully left so it always transmits. Voice activity
+  detection will gate the quiet parts of the sweep and ruin the measurement.
+
+Then join a voice channel from a SECOND endpoint signed in as a different
+account, and route its audio into the capture sink:
+
+  python3 tools/roundtrip.py streams        # find its index
+  pactl move-sink-input <index> {CAPTURE_SINK}
+
+You will stop hearing the far end - that is expected, its audio is now going
+to the recorder instead of your speakers.""")
+
+
+def teardown():
+    ids = _module_ids()
+    if not ids:
+        print("  nothing to remove")
+        return
+    for mid in ids:
+        _pactl("unload-module", mid, check=False)
+        print(f"  unloaded module {mid}")
+
+
+def list_streams():
+    """Playback streams, so the receiving endpoint can be routed."""
+    out = _pactl("list", "sink-inputs", check=False)
+    index = app = None
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Sink Input #"):
+            if index is not None:
+                rows.append((index, app or "?"))
+            index, app = line.split("#")[1], None
+        elif line.startswith("application.name ="):
+            app = line.split("=", 1)[1].strip().strip('"')
+    if index is not None:
+        rows.append((index, app or "?"))
+    if not rows:
+        print("  no playback streams; make sure the far end is actually making sound")
+        return
+    print("  index  application")
+    for idx, name in rows:
+        print(f"  {idx:>5}  {name}")
+    print(f"\n  pactl move-sink-input <index> {CAPTURE_SINK}")
+
+
 def list_devices():
     try:
         out = subprocess.run(
@@ -528,6 +617,68 @@ def selftest(out_dir, keep):
     return 1 if failed else 0
 
 
+BEGIN = "<!-- roundtrip:begin -->"
+END = "<!-- roundtrip:end -->"
+
+
+def install_readme(readme, png, before, after):
+    """Drop the chart and its numbers into the README, between markers.
+
+    Done from the measurement rather than by hand so the figures under the
+    image are always the ones that produced it, and so the section only exists
+    once a real measurement has been taken - a README referencing a chart that
+    was never generated is worse than no section at all.
+    """
+    import os
+
+    rel = os.path.relpath(png, os.path.dirname(os.path.abspath(readme)) or ".")
+
+    def cell(r, key, fmt):
+        v = r.get(key) if r else None
+        return fmt.format(v) if v is not None else "n/a"
+
+    rows = [
+        ("channels are", "channel_correlation",
+         lambda r: "**stereo**" if r["stereo"] else "mono"),
+        ("L/R correlation", "channel_correlation", lambda r: f"{r['channel_correlation']:.3f}"),
+        ("bandwidth", "bandwidth_hz", lambda r: cell(r, "bandwidth_hz", "{:.0f} Hz")),
+        ("round trip", "roundtrip_ms", lambda r: cell(r, "roundtrip_ms", "{:.0f} ms")),
+        ("below 100 Hz", "low_freq_db", lambda r: cell(r, "low_freq_db", "{:+.1f} dB")),
+    ]
+    table = ["| | before | after |", "| --- | --- | --- |"]
+    for label, _, fn in rows:
+        table.append(f"| {label} | {fn(before)} | {fn(after)} |")
+
+    section = f"""{BEGIN}
+## Before & after
+
+A real round trip through a Discord call: the probe goes into the patched
+client, out through Discord's servers, and is recorded at a second endpoint.
+Measured with [`tools/roundtrip.py`](tools/roundtrip.py); see
+[docs/measuring.md](docs/measuring.md) for the procedure.
+
+![before and after]({rel})
+
+{chr(10).join(table)}
+
+The headline number is the L/R correlation. Two channels carrying the same
+signal are mono however many channels the container claims.
+{END}"""
+
+    text = open(readme).read()
+    if BEGIN in text and END in text:
+        head, rest = text.split(BEGIN, 1)
+        text = head + section + rest.split(END, 1)[1]
+    else:
+        anchor = "## Documentation"
+        if anchor in text:
+            text = text.replace(anchor, section + "\n\n" + anchor, 1)
+        else:
+            text = text.rstrip() + "\n\n" + section + "\n"
+    open(readme, "w").write(text)
+    print(f"updated {readme}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -537,12 +688,17 @@ def main():
     p.add_argument("-o", "--out", default="probe.wav")
 
     sub.add_parser("devices", help="list PipeWire sources")
+    sub.add_parser("setup", help="create the probe and capture sinks")
+    sub.add_parser("teardown", help="remove them again")
+    sub.add_parser("streams", help="list playback streams, to route the far end")
 
     p = sub.add_parser("capture", help="play the probe and record the far end")
     p.add_argument("-s", "--signal", default="probe.wav")
     p.add_argument("-o", "--out", required=True)
-    p.add_argument("--play-target", help="node to play into (Discord's input)")
-    p.add_argument("--record-target", help="node to record from (far end's output)")
+    p.add_argument("--play-target", default=PROBE_SINK,
+                   help="node to play into (what the sending client listens to)")
+    p.add_argument("--record-target", default=CAPTURE_SINK + ".monitor",
+                   help="node to record from (where the far end's audio goes)")
     p.add_argument("--seconds", type=float, default=TOTAL + 3)
 
     p = sub.add_parser("analyze", help="measure one recording")
@@ -560,6 +716,8 @@ def main():
     p.add_argument("--after")
     p.add_argument("-o", "--out", default="roundtrip.png")
     p.add_argument("-t", "--title", default="Discord voice round trip")
+    p.add_argument("--readme", metavar="PATH",
+                   help="also insert the chart and its numbers into this README")
 
     a = ap.parse_args()
 
@@ -568,6 +726,12 @@ def main():
         print(f"wrote {a.out} ({TOTAL:.0f}s, {SR} Hz stereo)")
     elif a.cmd == "devices":
         list_devices()
+    elif a.cmd == "setup":
+        setup()
+    elif a.cmd == "teardown":
+        teardown()
+    elif a.cmd == "streams":
+        list_streams()
     elif a.cmd == "capture":
         capture(a.signal, a.out, a.play_target, a.record_target, a.seconds)
     elif a.cmd == "analyze":
@@ -591,6 +755,10 @@ def main():
         if not before and not after:
             raise SystemExit("need --before and/or --after")
         chart(before, after, a.out, a.title)
+        if a.readme:
+            if not (before and after):
+                raise SystemExit("--readme needs both --before and --after")
+            install_readme(a.readme, a.out, before, after)
 
 
 if __name__ == "__main__":

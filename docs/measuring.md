@@ -30,53 +30,90 @@ raw recorded spectrum would mostly describe the probe rather than the path.
 
 ## You need a second endpoint
 
-A client does not decode its own transmission, so there is no way to measure the
-encoder from inside one Discord client. You need a second endpoint — a phone, or
-a browser signed in as another account — in a voice channel with the patched
-client. The measurement is of the whole path: your input → encode → Discord's
-servers → decode → the second endpoint's output.
+A client does not decode its own transmission, so the encoder cannot be
+measured from inside one Discord client. You need a second endpoint in the
+voice channel with the patched one.
+
+It has to be a **different account**. Joining a voice channel from a second
+device on the same account moves you rather than adding you. The easiest
+arrangement is entirely local: the patched desktop client sends, and a
+throwaway account in a browser receives, both on this machine, in a voice
+channel on a server you own.
 
 ## Procedure
 
-Do the "before" run first, on an unpatched client (`stereocord restore` if
-needed), then patch and repeat. Nothing else about the setup may change between
-the two runs, or you are measuring the setup.
+Do the "before" run first, on an unpatched client (`stereocord restore`), then
+patch and repeat. Nothing else about the setup may change between the two runs,
+or you are measuring the setup.
 
 ```bash
 python3 tools/roundtrip.py signal -o probe.wav
+python3 tools/roundtrip.py setup
 ```
 
-Create a null sink and point Discord's input at its monitor:
+`setup` creates two virtual sinks: `stereocord_probe`, which the sending client
+listens to so the probe never goes near a real microphone, and
+`stereocord_capture`, where the receiving endpoint's audio is sent so the
+recording contains only the far end.
+
+In the **sending** client, Voice & Video:
+
+- Input Device → `Monitor of stereocord_probe`
+- Noise Suppression **off** (Krisp will mangle a sweep into something unrecognisable)
+- Echo Cancellation, Automatic Gain Control, Advanced Voice Activity **off**
+- Input Mode → **Push to Talk**, and hold it for the whole 11 seconds
+
+That last one matters more than it looks. With voice activity detection Discord
+gates the quiet parts of the sweep, so the low and high ends of the measured
+response are missing transmission rather than codec behaviour. Push-to-talk
+held down, or Input Sensitivity dragged fully left, avoids it.
+
+Join the channel from both endpoints, then route the receiver:
 
 ```bash
-pactl load-module module-null-sink sink_name=stereocord_probe
+python3 tools/roundtrip.py streams
+pactl move-sink-input <index> stereocord_capture
 ```
 
-In Discord: Voice & Video → Input Device → `Monitor of stereocord_probe`. Turn
-off noise suppression, echo cancellation and automatic gain control — they are
-input processing and will show up in the measurement as if they were the codec.
+You will stop hearing the far end. That is the point — its audio is going to
+the recorder now. Check the receiving side is at full volume, and that the
+sender's per-user volume slider is at 100%.
 
-Find the source to record from — the monitor of whatever is playing the far end:
+Then, holding push-to-talk:
 
 ```bash
-python3 tools/roundtrip.py devices
+python3 tools/roundtrip.py capture -o before.wav
 ```
 
-Join a voice channel with the second endpoint, then:
-
-```bash
-python3 tools/roundtrip.py capture -o before.wav --play-target stereocord_probe --record-target <source>
-```
+`capture` defaults to the two sinks `setup` made, so it needs no targets. Patch,
+rejoin, and repeat with `-o after.wav`. Then:
 
 ```bash
 python3 tools/roundtrip.py analyze before.wav -l before -o before.json
+python3 tools/roundtrip.py analyze after.wav  -l after  -o after.json
+python3 tools/roundtrip.py chart --before before.json --after after.json \
+    -o docs/roundtrip.png --readme README.md
 ```
 
-Repeat after patching to get `after.json`, then:
+`--readme` inserts the chart and its numbers into the README between
+`<!-- roundtrip:begin -->` markers, so the figures shown are always the ones
+that produced the image. Re-running updates the section in place.
+
+Finally:
 
 ```bash
-python3 tools/roundtrip.py chart --before before.json --after after.json -o roundtrip.png
+python3 tools/roundtrip.py teardown
 ```
+
+## Sanity checks before you trust a run
+
+- Play `before.wav` back. You should hear the chirp and both sweeps. If it is
+  silent or choppy, transmission was gated — check push-to-talk.
+- `roundtrip_ms` should be somewhere in the 40–300 ms range. A value near zero
+  means the recording picked up local playback rather than the far end, and the
+  whole run is measuring your own soundcard.
+- Both runs should report `channels: 2`. If the recording is mono the capture
+  target was wrong.
 
 ## Reading the result
 
