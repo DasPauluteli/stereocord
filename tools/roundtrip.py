@@ -356,7 +356,11 @@ def chart(before, after, out_path, title):
     fig.suptitle(title, fontsize=13, y=0.99)
 
     runs = [r for r in (before, after) if r]
-    colors = {"before": "#b0413e", "after": "#2f6f4f"}
+    # Red against blue rather than red against green: the "after" trace often
+    # sits flat along the 0 dB line, so it needs to stand out from both the
+    # reference line and the "before" trace — and red/green is the one pair
+    # that disappears for the most common kinds of colour blindness.
+    colors = {"before": "#b0413e", "after": "#0b6fd8"}
 
     ax = axes[0]
     for r in runs:
@@ -366,11 +370,14 @@ def chart(before, after, out_path, title):
         # energy, rather than drawing a line through nonsense.
         left = np.array([np.nan if v is None else v for v in r["response"]["left"]])
         right = np.array([np.nan if v is None else v for v in r["response"]["right"]])
-        ax.semilogx(f, left, color=c, lw=1.2, label=f"{r['label']} L")
-        ax.semilogx(f, right, color=c, lw=1.0, ls="--", alpha=0.65, label=f"{r['label']} R")
+        # Draw "after" over "before" so a flat trace is not hidden beneath it.
+        z = 3 if r is after else 2
+        ax.semilogx(f, left, color=c, lw=1.6, label=f"{r['label']} L", zorder=z)
+        ax.semilogx(f, right, color=c, lw=1.1, ls="--", alpha=0.75,
+                    label=f"{r['label']} R", zorder=z)
     ax.set_xlim(20, 24000)
     ax.set_ylim(-60, 12)
-    ax.axhline(0, color="#999", lw=0.8)
+    ax.axhline(0, color="#bbb", lw=0.8, zorder=1)
     # A log axis defaults to 10^n labels. Audio bandwidths are read as plain
     # numbers, so label the decade edges and the useful points between them
     # and drop the minor labels entirely.
