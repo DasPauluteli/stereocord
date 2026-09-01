@@ -785,7 +785,7 @@ def selftest(out_dir, keep):
     png = os.path.join(out_dir, "roundtrip-selftest.png")
     try:
         chart(b, a, png,
-              "Analysis self-test on synthetic recordings (not a Discord measurement)")
+              "What the patch changes - simulated signal path, not a Discord capture")
     except ImportError:
         print("  (matplotlib missing, chart skipped)")
 

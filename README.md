@@ -85,6 +85,39 @@ The headline number is the L/R correlation. Two channels carrying the same
 signal are mono however many channels the container claims.
 <!-- roundtrip:end -->
 
+## What the patch changes
+
+![the difference the patch makes](docs/roundtrip-selftest.png)
+
+**This is a simulation, not a Discord capture.** It is the output of
+`python3 tools/roundtrip.py selftest`, which runs the analysis over two
+synthetic recordings with known properties — one folded to mono, band-limited
+and high-passed, one stereo, full-band and unfiltered — to verify the
+measurement code recovers what was put in. It shows the shape of the change
+the patch is meant to produce, and nothing about any particular Discord build.
+
+Stereo output is confirmed working by listeners on Discord desktop. No
+end-to-end capture is published here: measuring one needs a cooperating second
+person on a desktop client (see [docs/measuring.md](docs/measuring.md)), and a
+chart is only worth putting in a README if it came from a real one.
+
+## Which clients can hear it
+
+Stereo has to be negotiated by both ends. The patch only controls the sending
+side, so what a listener actually hears depends on their client:
+
+| Client | Receives stereo |
+| --- | --- |
+| Desktop (Linux / Windows / macOS) | yes — confirmed by listeners |
+| Browser (discord.com) | no — reported not to negotiate stereo |
+| Mobile | varies by client and version |
+| Console | unverified |
+
+A listener on a client that will not negotiate stereo hears mono no matter how
+well the sending side is patched. This is also why a browser is useless as the
+receiving end of a measurement: the result comes back mono and looks like the
+patch failed.
+
 ## Documentation
 
 - [docs/how-it-works.md](docs/how-it-works.md) — how sites are located and validated, and what the injected filters do
