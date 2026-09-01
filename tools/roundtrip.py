@@ -257,6 +257,38 @@ def low_energy(freqs, resp, hz=100.0):
     return float(np.median(low)) if len(low) else None
 
 
+def codec_residual_db(seg, ref_seg):
+    """How far the recording departs from the probe, in dB.
+
+    A lossy codec cannot reproduce a full-band sweep exactly. A digital
+    loopback can, and does, to around -90 dB. This is therefore the most
+    reliable way to tell "went through Discord" from "never left the machine",
+    and it does not care *why* the routing was wrong.
+
+    Channel folding also shows up here, since a mono downmix makes the left
+    channel differ from the left of the probe. Either way, a near-zero residual
+    means no codec was involved.
+    """
+    n = min(len(seg), len(ref_seg))
+    if n < 1000:
+        return None
+    a, b = seg[:n, 0], ref_seg[:n, 0]
+    denom = float(np.dot(b, b))
+    if denom < 1e-12:
+        return None
+    scale = float(np.dot(a, b)) / denom
+    resid = a - scale * b
+    rms_a = float(np.sqrt((a ** 2).mean()))
+    if rms_a < 1e-9:
+        return None
+    return float(20 * np.log10(np.sqrt((resid ** 2).mean()) / rms_a + 1e-20))
+
+
+# Opus never gets near this on a full-band sweep; a digital loopback sits
+# around -90 dB. Anything below means nothing encoded the signal.
+NO_CODEC_DB = -60.0
+
+
 def analyze(rec_path, label):
     rec, sr = read_wav(rec_path)
     ref = build_signal()
@@ -284,9 +316,13 @@ def analyze(rec_path, label):
     else:
         f_r, db_r = f_l, db_l
 
+    residual = codec_residual_db(seg[:n], ref_seg[:n])
+
     return {
         "label": label,
         "source": rec_path,
+        "codec_residual_db": residual,
+        "went_through_codec": None if residual is None else residual > NO_CODEC_DB,
         "sample_rate": sr,
         "channels": int(seg.shape[1]),
         "roundtrip_ms": delay,
@@ -472,7 +508,27 @@ def list_devices():
     )
 
 
+def _node_exists(name):
+    """Is this a real sink or source right now?"""
+    listing = (_pactl("list", "short", "sinks", check=False)
+               + _pactl("list", "short", "sources", check=False))
+    base = name[:-8] if name.endswith(".monitor") else name
+    return any(line.split("\t")[1] in (name, base)
+               for line in listing.splitlines() if "\t" in line)
+
+
 def capture(signal_path, out_path, play_target, record_target, seconds):
+    # pw-record and pw-play fall back to the default device when a target does
+    # not resolve, silently, and the resulting file looks perfectly reasonable.
+    # That is how a measurement ends up describing the local soundcard.
+    for role, target in (("play", play_target), ("record", record_target)):
+        if target and not _node_exists(target):
+            raise SystemExit(
+                f"{role} target {target!r} does not exist.\n"
+                "Run 'roundtrip.py setup' first - and note that 'teardown' removes\n"
+                "these devices, so anything recorded after it goes to the default\n"
+                "device instead, which is not a measurement of anything.")
+
     play = ["pw-play"] + (["--target", play_target] if play_target else []) + [signal_path]
     rec = ["pw-record"] + (["--target", record_target] if record_target else []) + [
         "--rate", str(SR), "--channels", "2", "--format", "s16", out_path,
@@ -813,6 +869,19 @@ def main():
             print(f"wrote {a.out}")
         summary = {k: v for k, v in r.items() if k != "response"}
         print(json.dumps(summary, indent=2))
+        if r["went_through_codec"] is False:
+            print(f"""
+WARNING: this recording never went through a codec.
+
+  The probe came back with a residual of {r['codec_residual_db']:.0f} dB, which
+  means it is a bit-exact copy. Opus cannot do that. The audio looped back
+  through the virtual devices without passing through Discord, so every number
+  above describes your own soundcard rather than the call.
+
+  Most likely the record target did not resolve and pw-record fell back to the
+  default source. Check that the receiving endpoint's audio really is going to
+  {CAPTURE_SINK}, and that the sinks still exist (teardown removes them).""")
+            return 1
     elif a.cmd == "selftest":
         return selftest(a.out_dir, a.keep_wavs)
     elif a.cmd == "chart":
@@ -824,6 +893,12 @@ def main():
         before, after = load(a.before), load(a.after)
         if not before and not after:
             raise SystemExit("need --before and/or --after")
+        bad = [r["label"] for r in (before, after)
+               if r and r.get("went_through_codec") is False]
+        if bad:
+            raise SystemExit(
+                f"refusing to chart: {', '.join(bad)} never went through a codec, so "
+                "the numbers describe local playback rather than a call. Re-record.")
         chart(before, after, a.out, a.title)
         if a.readme:
             if not (before and after):

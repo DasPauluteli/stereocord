@@ -3,3 +3,6 @@
 *.node
 __pycache__/
 docs/selftest_*.json
+before.json
+after.json
+docs/roundtrip.png
