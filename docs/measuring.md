@@ -28,17 +28,40 @@ Frequency response is computed as recorded-spectrum minus probe-spectrum. A log
 sweep deliberately puts more energy per Hz at the bottom of its range, so the
 raw recorded spectrum would mostly describe the probe rather than the path.
 
-## You need a second endpoint
+## You need a second endpoint, and it has to be a desktop client
 
 A client does not decode its own transmission, so the encoder cannot be
 measured from inside one Discord client. You need a second endpoint in the
-voice channel with the patched one.
+voice channel, on a **different account**: joining from a second device on the
+same account moves you rather than adding you.
 
-It has to be a **different account**. Joining a voice channel from a second
-device on the same account moves you rather than adding you. The easiest
-arrangement is entirely local: the patched desktop client sends, and a
-throwaway account in a browser receives, both on this machine, in a voice
-channel on a server you own.
+Two constraints make this harder than it looks.
+
+**Discord in a browser will not do stereo.** It is reported not to negotiate a
+stereo stream, so a measurement taken against a browser comes back mono no
+matter what the sending client does. That is a false negative: the patch looks
+broken when the receiver is the limitation. Use a Discord **desktop** client as
+the receiver.
+
+**Discord only runs one desktop instance per machine.** `--user-data-dir` does
+not help — Discord ignores it and re-uses the default profile, and a second
+launch prints `Quitting secondary instance` and exits. So the two endpoints
+cannot both be desktop clients on one machine.
+
+That leaves:
+
+- **Someone else on Discord desktop** records their end and sends you the WAV.
+  They need the capture half of this setup, nothing else: `setup`, route their
+  Discord output to `stereocord_capture`, and record while you play the probe.
+  This is the least effort and adds no variables to the sending side.
+- **A second machine or a VM** with its own Discord install.
+- **A phone** on a second account, if you can capture its output digitally.
+  Going out its headphone jack and back in through an interface adds an analog
+  stage, and a mono input will destroy the very thing being measured.
+
+If none of those is available, the round trip cannot be measured. The patch can
+still be verified the cheap way: ask someone on desktop whether you sound
+stereo.
 
 ## Procedure
 
@@ -89,9 +112,7 @@ response are missing transmission rather than codec behaviour. Push-to-talk
 held down, or Input Sensitivity dragged fully left, avoids it.
 
 The **receiving** endpoint needs no device selection at all — its audio is moved
-with `pactl` rather than chosen in its settings. If it is Discord in a browser,
-the browser will still ask for microphone permission before it will join voice
-and enumerate devices; grant it and mute, or it will list nothing.
+with `pactl` rather than chosen in its settings.
 
 Join the channel from both endpoints, then route the receiver:
 

@@ -63,6 +63,28 @@ applied by the injected filters, `-c/--client <text>` to narrow to one install,
 `-a/--all` for every install rather than the newest per channel, `--allow-partial`
 to apply the sites that did resolve on a build where some did not.
 
+<!-- roundtrip:begin -->
+## Before & after
+
+A real round trip through a Discord call: the probe goes into the patched
+client, out through Discord's servers, and is recorded at a second endpoint.
+Measured with [`tools/roundtrip.py`](tools/roundtrip.py); see
+[docs/measuring.md](docs/measuring.md) for the procedure.
+
+![before and after](docs/roundtrip.png)
+
+| | before | after |
+| --- | --- | --- |
+| channels are | mono | mono |
+| L/R correlation | 1.000 | 1.000 |
+| bandwidth | 20000 Hz | 20000 Hz |
+| round trip | 239 ms | 234 ms |
+| below 100 Hz | -40.5 dB | +0.0 dB |
+
+The headline number is the L/R correlation. Two channels carrying the same
+signal are mono however many channels the container claims.
+<!-- roundtrip:end -->
+
 ## Documentation
 
 - [docs/how-it-works.md](docs/how-it-works.md) — how sites are located and validated, and what the injected filters do
@@ -151,7 +173,9 @@ correlation (the mono-versus-stereo test), effective bandwidth, and low-end
 attenuation. See [docs/measuring.md](docs/measuring.md).
 
 It needs a second endpoint in the call, because a client does not decode its own
-transmission.
+transmission — and that endpoint has to be a Discord **desktop** client on
+another machine, since the browser client will not negotiate stereo and Discord
+refuses to run twice on one machine.
 
 The analysis is validated against synthetic recordings with known properties —
 `python3 tools/roundtrip.py selftest` checks the recovered numbers against the
