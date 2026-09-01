@@ -2,3 +2,4 @@
 *.wav
 *.node
 __pycache__/
+docs/selftest_*.json
