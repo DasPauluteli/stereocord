@@ -66,17 +66,19 @@ to apply the sites that did resolve on a build where some did not.
 <!-- roundtrip:begin -->
 ## Before & after
 
-A real round trip through a Discord call: the probe goes into the patched
-client, out through Discord's servers, and is recorded at a second endpoint.
-Measured with [`tools/roundtrip.py`](tools/roundtrip.py); see
+A real round trip through a Discord call, between two Discord desktop clients
+on separate machines: the probe goes into the sending client, out through
+Discord's servers, and is recorded at the receiving end. Only the sender is
+patched — the receiving client is a stock, unmodified install. Measured with
+[`tools/roundtrip.py`](tools/roundtrip.py); see
 [docs/measuring.md](docs/measuring.md) for the procedure.
 
 ![before and after](docs/roundtrip.png)
 
 | | before | after |
 | --- | --- | --- |
-| channels are | mono | mono |
-| L/R correlation | 1.000 | 1.000 |
+| channels are | mono | **stereo** |
+| L/R correlation | 1.000 | -0.004 |
 | bandwidth | 20000 Hz | 20000 Hz |
 | round trip | 239 ms | 234 ms |
 | below 100 Hz | -40.5 dB | +0.0 dB |
@@ -85,21 +87,17 @@ The headline number is the L/R correlation. Two channels carrying the same
 signal are mono however many channels the container claims.
 <!-- roundtrip:end -->
 
-## What the patch changes
+## Validating the measurement
 
-![the difference the patch makes](docs/roundtrip-selftest.png)
+![the measurement self-test](docs/roundtrip-selftest.png)
 
-**This is a simulation, not a Discord capture.** It is the output of
-`python3 tools/roundtrip.py selftest`, which runs the analysis over two
-synthetic recordings with known properties — one folded to mono, band-limited
-and high-passed, one stereo, full-band and unfiltered — to verify the
-measurement code recovers what was put in. It shows the shape of the change
-the patch is meant to produce, and nothing about any particular Discord build.
-
-Stereo output is confirmed working by listeners on Discord desktop. No
-end-to-end capture is published here: measuring one needs a cooperating second
-person on a desktop client (see [docs/measuring.md](docs/measuring.md)), and a
-chart is only worth putting in a README if it came from a real one.
+The second chart is **a simulation, not a Discord capture** — it says nothing
+about any particular Discord build, and is here only to show that the analysis
+behind the first chart works. It is the output of `python3
+tools/roundtrip.py selftest`, which runs the same analysis over two synthetic
+recordings with known properties — one folded to mono, band-limited and
+high-passed, one stereo, full-band and unfiltered — and checks that the
+measurement code recovers what was put in.
 
 ## Which clients can hear it
 
@@ -108,15 +106,17 @@ side, so what a listener actually hears depends on their client:
 
 | Client | Receives stereo |
 | --- | --- |
-| Desktop (Linux / Windows / macOS) | yes — confirmed by listeners |
+| Desktop (Linux / Windows / macOS) | yes — measured, on a stock client |
 | Browser (discord.com) | no — reported not to negotiate stereo |
 | Mobile | varies by client and version |
 | Console | unverified |
 
-A listener on a client that will not negotiate stereo hears mono no matter how
-well the sending side is patched. This is also why a browser is useless as the
-receiving end of a measurement: the result comes back mono and looks like the
-patch failed.
+A listener does not need the patch — the desktop client in the measurement
+above was stock, and it decoded stereo because a desktop client negotiates it
+when the sender offers it. What a listener needs is a client that negotiates
+stereo at all: on one that does not, they hear mono no matter how well the
+sending side is patched. This is also why a browser is useless as the receiving end of a
+measurement: the result comes back mono and looks like the patch failed.
 
 ## Documentation
 
@@ -208,12 +208,13 @@ attenuation. See [docs/measuring.md](docs/measuring.md).
 It needs a second endpoint in the call, because a client does not decode its own
 transmission — and that endpoint has to be a Discord **desktop** client on
 another machine, since the browser client will not negotiate stereo and Discord
-refuses to run twice on one machine.
+refuses to run twice on one machine. It does not have to be patched; the
+published measurement was taken against a stock receiving client.
 
-The analysis is validated against synthetic recordings with known properties —
-`python3 tools/roundtrip.py selftest` checks the recovered numbers against the
-injected ones and exits non-zero if any drift. That self-test is the only chart
-in this repository, and it is not a Discord measurement.
+The analysis itself is validated against synthetic recordings with known
+properties — `python3 tools/roundtrip.py selftest` checks the recovered numbers
+against the injected ones and exits non-zero if any drift. That is the second
+chart above, and it is a simulation rather than a Discord measurement.
 
 ## Caveats
 
