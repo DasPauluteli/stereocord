@@ -134,9 +134,11 @@ python3 tools/roundtrip.py teardown
 
 - Play `before.wav` back. You should hear the chirp and both sweeps. If it is
   silent or choppy, transmission was gated — check push-to-talk.
-- `roundtrip_ms` should be somewhere in the 40–300 ms range. A value near zero
-  means the recording picked up local playback rather than the far end, and the
-  whole run is measuring your own soundcard.
+- `roundtrip_ms` should be clearly above the baseline `loopback` reported. The
+  virtual devices alone cost tens of milliseconds depending on the graph
+  quantum, and a real call adds network and jitter buffer on top. A figure at
+  or below the loopback baseline means the recording picked up local playback
+  rather than the far end, and the run is measuring your own soundcard.
 - Both runs should report `channels: 2`. If the recording is mono the capture
   target was wrong.
 

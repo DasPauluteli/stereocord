@@ -430,7 +430,12 @@ def loopback(tmp_wav):
          f"correlation {r['channel_correlation']:.4f}"),
         ("full bandwidth", (r["bandwidth_hz"] or 0) >= 18000,
          f"{r['bandwidth_hz']:.0f} Hz"),
-        ("delay is buffering only", (r["roundtrip_ms"] or 999) < 60,
+        # Not a tightness check. Local buffering depends on the graph quantum
+        # and how many nodes the signal hops through, and legitimately ranges
+        # from a few milliseconds to a couple of hundred. What matters is that
+        # a delay was recoverable at all: a wild or negative value means
+        # cross-correlation found no peak, i.e. the recording holds no probe.
+        ("delay is recoverable", 0 <= (r["roundtrip_ms"] or -1) < 500,
          f"{r['roundtrip_ms']:.1f} ms"),
     ]
     width = max(len(n) for n, _, _ in checks)
@@ -442,8 +447,13 @@ def loopback(tmp_wav):
         print("\n  The virtual devices are not carrying the probe intact. Fix this\n"
               "  before measuring a call, or the call will get the blame.")
     else:
-        print("\n  Routing is good. The probe survives the virtual devices unchanged,\n"
-              "  so anything a real run shows is Discord's doing.")
+        print(f"""
+  Routing is good. The probe survives the virtual devices unchanged, so
+  anything a real run shows is Discord's doing.
+
+  Baseline latency of the routing itself: {r['roundtrip_ms']:.0f} ms. A real call should
+  come back clearly above that; a result at or below it means the recording
+  picked up local playback rather than the far end.""")
     return 1 if failed else 0
 
 
