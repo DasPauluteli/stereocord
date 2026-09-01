@@ -349,6 +349,7 @@ def chart(before, after, out_path, title):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FixedLocator, FuncFormatter, NullFormatter
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.6),
                              gridspec_kw={"width_ratios": [1.5, 1.0, 1.1]})
@@ -370,7 +371,15 @@ def chart(before, after, out_path, title):
     ax.set_xlim(20, 24000)
     ax.set_ylim(-60, 12)
     ax.axhline(0, color="#999", lw=0.8)
-    ax.set_xlabel("Hz")
+    # A log axis defaults to 10^n labels. Audio bandwidths are read as plain
+    # numbers, so label the decade edges and the useful points between them
+    # and drop the minor labels entirely.
+    ticks = [20, 50, 100, 500, 1000, 5000, 10000, 20000]
+    ax.xaxis.set_major_locator(FixedLocator(ticks))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.tick_params(axis="x", labelsize=7.5)
+    ax.set_xlabel("Frequency (Hz)")
     ax.set_ylabel("dB relative to 200-1000 Hz")
     ax.set_title("Path frequency response")
     ax.grid(alpha=0.3, which="both")
