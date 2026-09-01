@@ -3,7 +3,7 @@ name = "stereocord"
 version = "1.0.0"
 edition = "2021"
 description = "Signature-based stereo / high-bitrate patcher for Discord's Linux voice module"
-license-file = "LICENSE"
+license = "CC-BY-NC-SA-4.0"
 repository = "https://github.com/DasPauluteli/stereocord"
 
 [[bin]]

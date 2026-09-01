@@ -1,8 +1,12 @@
 // ----------------------------------------------------------------------------
-// "THE BIERWARE LICENSE" (Revision 1):
-// <67437654+DasPauluteli@users.noreply.github.com> wrote this file. As long as
-// you retain this notice you can do whatever you want with this stuff. If we
-// meet some day you have to buy me a beer in return - Paul Neri
+// stereocord - Copyright (c) 2026 Paul Neri
+// <67437654+DasPauluteli@users.noreply.github.com>
+//
+// Licensed under CC BY-NC-SA 4.0: non-commercial use, share alike, keep this
+// notice, no patent grant. See LICENSE, or
+// https://creativecommons.org/licenses/by-nc-sa/4.0/
+//
+// SPDX-License-Identifier: CC-BY-NC-SA-4.0
 // ----------------------------------------------------------------------------
 
 //! Just enough ELF64 to read a symbol table.

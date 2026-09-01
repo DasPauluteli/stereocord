@@ -239,11 +239,22 @@ chart above, and it is a simulation rather than a Discord measurement.
 
 ## License
 
-[THE BIERWARE LICENSE](LICENSE) (Revision 1).
+[CC BY-NC-SA 4.0](LICENSE) — Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International.
 
-> `<67437654+DasPauluteli@users.noreply.github.com>` wrote this file. As long as
-> you retain this notice you can do whatever you want with this stuff. If we
-> meet some day you have to buy me a beer in return — Paul Neri
+| | |
+| --- | --- |
+| modify and redistribute | yes, under the same license |
+| commercial use | no |
+| patent rights | not granted |
+| attribution and this notice | required |
 
-The notice is reproduced at the top of every source file. Retaining it is the
-one condition on the grant, so keep it there if you copy any of this.
+Copyright © 2026 Paul Neri
+`<67437654+DasPauluteli@users.noreply.github.com>`. The notice is reproduced at
+the top of every source file; keep it there if you copy any of this, and put
+what you build on top of it under the same terms.
+
+The license does not oblige you to publish source. If you ship a modified build
+of a tool whose whole point is that you can check what it writes into someone
+else's binary, publish the source anyway — that is a request rather than a
+term, and it is stated as one in [LICENSE](LICENSE).
