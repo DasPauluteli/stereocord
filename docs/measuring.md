@@ -94,10 +94,26 @@ before concluding the patch failed.
 
 ## Self-test
 
-The analysis is validated against synthetic recordings with known properties —
-a mono, band-limited, high-passed path versus a stereo, full-band, unfiltered
-one. It recovers the injected delays exactly and separates the two cases
-cleanly:
+```bash
+python3 tools/roundtrip.py selftest
+```
+
+Builds two synthetic recordings with known properties — a mono, band-limited,
+high-passed path versus a stereo, full-band, unfiltered one — runs the analysis
+over them, and checks the recovered numbers against what was injected. It exits
+non-zero if any check fails, so it is a test rather than a demonstration.
+
+```
+PASS  before delay recovered            92.0 ms, injected 92
+PASS  after delay recovered             88.0 ms, injected 88
+PASS  mono path reads as mono           correlation 1.0000
+PASS  stereo path reads as stereo       correlation -0.0038
+PASS  band-limited path reads narrower  11309 Hz vs 20000 Hz
+PASS  high-passed path loses low end    -6.7 dB
+PASS  unfiltered path keeps low end     +0.0 dB
+```
+
+It also regenerates the chart below:
 
 ![self-test](roundtrip-selftest.png)
 

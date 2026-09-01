@@ -21,6 +21,7 @@ inside one client, because a client does not decode its own transmission.
 
 Subcommands:
   signal    write the test signal to a WAV
+  selftest  validate the analysis against signals with known properties
   devices   list PipeWire nodes, to find capture/playback targets
   capture   play the signal and record the far end simultaneously
   analyze   turn one recording into measurements (JSON)
@@ -412,6 +413,105 @@ def chart(before, after, out_path, title):
     print(f"wrote {out_path}")
 
 
+# --------------------------------------------------------------------------
+# self-test
+# --------------------------------------------------------------------------
+
+def _shape(x, lp=None, hp=None, sr=SR):
+    """Apply a low-pass and/or high-pass in the frequency domain."""
+    n = len(x)
+    X = np.fft.rfft(x)
+    f = np.fft.rfftfreq(n, 1 / sr)
+    H = np.ones(len(f))
+    if lp:
+        H *= 1 / np.sqrt(1 + (f / lp) ** 12)
+    if hp:
+        H *= (f / hp) ** 2 / np.sqrt(1 + (f / hp) ** 4)
+    return np.fft.irfft(X * H, n)
+
+
+def _simulate(delay_ms, mono, lp, hp, noise=2e-4, sr=SR):
+    """A recording of the probe through a path with known properties."""
+    ref = build_signal()
+    d = int(delay_ms / 1000 * sr)
+    out = np.zeros((len(ref) + d, 2))
+    left, right = ref[:, 0], ref[:, 1]
+    if mono:
+        m = (left + right) / 2
+        left = right = m
+    out[d:, 0] = _shape(left, lp, hp, sr)
+    out[d:, 1] = _shape(right, lp, hp, sr)
+    return out + np.random.default_rng(7).normal(0, noise, out.shape)
+
+
+# Two paths standing in for a stock and a patched client: folded to mono with
+# hybrid-mode bandwidth and an active high-pass, versus stereo, full band, no
+# high-pass.
+SELFTEST_CASES = {
+    "before": dict(delay_ms=92, mono=True, lp=7800, hp=85),
+    "after": dict(delay_ms=88, mono=False, lp=19500, hp=None),
+}
+
+
+def selftest(out_dir, keep):
+    """Check the analysis against recordings whose properties are known.
+
+    This validates the measurement code. It says nothing about Discord, and
+    the chart it produces is not a Discord measurement.
+    """
+    import os
+
+    os.makedirs(out_dir, exist_ok=True)
+    results = {}
+    for label, spec in SELFTEST_CASES.items():
+        wav = os.path.join(out_dir, f"selftest_{label}.wav")
+        write_wav(wav, _simulate(**spec))
+        results[label] = analyze(wav, label)
+        if not keep:
+            os.remove(wav)
+
+    b, a = results["before"], results["after"]
+    checks = [
+        ("before delay recovered",
+         abs(b["roundtrip_ms"] - 92) < 2, f"{b['roundtrip_ms']:.1f} ms, injected 92"),
+        ("after delay recovered",
+         abs(a["roundtrip_ms"] - 88) < 2, f"{a['roundtrip_ms']:.1f} ms, injected 88"),
+        ("mono path reads as mono",
+         b["channel_correlation"] > 0.9 and not b["stereo"],
+         f"correlation {b['channel_correlation']:.4f}"),
+        ("stereo path reads as stereo",
+         abs(a["channel_correlation"]) < 0.1 and a["stereo"],
+         f"correlation {a['channel_correlation']:.4f}"),
+        ("band-limited path reads narrower",
+         a["bandwidth_hz"] > b["bandwidth_hz"],
+         f"{b['bandwidth_hz']:.0f} Hz vs {a['bandwidth_hz']:.0f} Hz"),
+        ("high-passed path loses low end",
+         b["low_freq_db"] < -3.0, f"{b['low_freq_db']:+.1f} dB"),
+        ("unfiltered path keeps low end",
+         abs(a["low_freq_db"]) < 1.0, f"{a['low_freq_db']:+.1f} dB"),
+    ]
+
+    width = max(len(n) for n, _, _ in checks)
+    failed = 0
+    for name, ok, detail in checks:
+        print(f"  {'PASS' if ok else 'FAIL'}  {name:<{width}}  {detail}")
+        failed += not ok
+
+    for label, r in results.items():
+        with open(os.path.join(out_dir, f"selftest_{label}.json"), "w") as f:
+            json.dump(r, f, indent=2)
+
+    png = os.path.join(out_dir, "roundtrip-selftest.png")
+    try:
+        chart(b, a, png,
+              "Analysis self-test on synthetic recordings (not a Discord measurement)")
+    except ImportError:
+        print("  (matplotlib missing, chart skipped)")
+
+    print(f"\n  {len(checks) - failed}/{len(checks)} checks passed")
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -433,6 +533,11 @@ def main():
     p.add_argument("recording")
     p.add_argument("-l", "--label", default="run")
     p.add_argument("-o", "--out", help="write JSON here")
+
+    p = sub.add_parser("selftest", help="validate the analysis against known signals")
+    p.add_argument("-o", "--out-dir", default="docs")
+    p.add_argument("--keep-wavs", action="store_true",
+                   help="leave the synthetic recordings on disk")
 
     p = sub.add_parser("chart", help="render before/after")
     p.add_argument("--before")
@@ -458,6 +563,8 @@ def main():
             print(f"wrote {a.out}")
         summary = {k: v for k, v in r.items() if k != "response"}
         print(json.dumps(summary, indent=2))
+    elif a.cmd == "selftest":
+        return selftest(a.out_dir, a.keep_wavs)
     elif a.cmd == "chart":
         def load(p):
             if not p:

@@ -151,9 +151,12 @@ correlation (the mono-versus-stereo test), effective bandwidth, and low-end
 attenuation. See [docs/measuring.md](docs/measuring.md).
 
 It needs a second endpoint in the call, because a client does not decode its own
-transmission. The analysis is validated against synthetic recordings with known
-properties; that self-test is the only chart in this repository, and it is not a
-Discord measurement.
+transmission.
+
+The analysis is validated against synthetic recordings with known properties —
+`python3 tools/roundtrip.py selftest` checks the recovered numbers against the
+injected ones and exits non-zero if any drift. That self-test is the only chart
+in this repository, and it is not a Discord measurement.
 
 ## Caveats
 
