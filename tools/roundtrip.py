@@ -460,12 +460,28 @@ def list_streams():
     for r in rows:
         mark = " <- already routed" if r["sink"] == CAPTURE_SINK else ""
         print(f"  {r['index']:>5}  {r['app']:<22} {r['media']:<34} {r['sink']}{mark}")
+    routed = [r for r in rows if r["sink"] == CAPTURE_SINK]
     print(f"""
   Route the RECEIVING endpoint, not the sending Discord. "WEBRTC VoiceEngine"
   is Discord's own desktop client - moving that one records the sender's
   playback rather than the far end.
 
   pactl move-sink-input <index> {CAPTURE_SINK}""")
+
+    if len(routed) > 1:
+        apps = ", ".join(sorted({r["app"] for r in routed}))
+        print(f"""
+  {len(routed)} streams are on {CAPTURE_SINK} ({apps}). That is usually fine:
+  a browser keeps a playback stream open per renderer even in silence, and all
+  its tabs share one audio process, so they cannot be told apart here. Whichever
+  one carries the call is already routed.
+
+  It only matters if something else plays during the capture, since that lands
+  in the recording too. Check the tap is quiet before recording:
+
+    parec -d {CAPTURE_SINK}.monitor --file-format=wav /tmp/q.wav & sleep 3; kill %1
+
+  With the far end silent, that file should be silence.""")
 
 
 def loopback(tmp_wav):
