@@ -1,3 +1,7 @@
+> **Warning**
+> This modifies Discord's client files, which is against Discord's terms of
+> service. Use at your own risk. Not affiliated with Discord Inc.
+
 # stereocord
 
 Forces true stereo, 48 kHz and a high Opus bitrate in Discord's Linux voice
@@ -158,5 +162,5 @@ Discord measurement.
   sits half-populated — it looks like a stalled download. To take an update:
   `stereocord restore`, start Discord and let it update, quit, then
   `stereocord patch` again. `scan` detects this state and says so.
-- Editing client files is against Discord's terms of service. Your account, your
-  call. Not affiliated with Discord Inc.
+- Editing client files is against Discord's terms of service (see the warning at
+  the top). Your account, your call.
