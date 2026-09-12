@@ -189,10 +189,15 @@ pub static SITES: &[Site] = &[
         expect: Expect::One,
         symbols: &[SYM_CAPTURED_AUDIO_PROCESS],
         entry: false,
-        patterns: &[(
-            "4C 89 F7 E8 ?? ?? ?? ?? 84 C0 74 0D 83 BB ?? ?? ?? ?? 09 0F 8F",
-            8,
-        )],
+        // `Process` guards two blocks with the same `muted() && type > 9` test;
+        // the downmix is the second, told apart by its `je 0x0d` and near `jg`
+        // where the first has `je 0x09` and a short one. Which register holds
+        // the frame pointer moved from r14 to r15 in 1.0.157, so the call setup
+        // is carried in both encodings.
+        patterns: &[
+            ("4C 89 F7 E8 ?? ?? ?? ?? 84 C0 74 0D 83 BB ?? ?? ?? ?? 09 0F 8F", 8),
+            ("4C 89 FF E8 ?? ?? ?? ?? 84 C0 74 0D 83 BB ?? ?? ?? ?? 09 0F 8F", 8),
+        ],
         action: Action::Bytes(NOP12_JMP),
         // Only the leading opcodes are fixed; the `cmp` displacement moves
         // between builds, so the check is a prefix rather than the full run.

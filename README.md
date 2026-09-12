@@ -180,6 +180,7 @@ the newest install per channel that has a module.
 
 | Build | Sites | Notes |
 | --- | --- | --- |
+| Stable 1.0.157 | 15/19 + 4 n/a | fully covered |
 | Stable 1.0.155 | 15/19 + 4 n/a | fully covered |
 | Stable 1.0.153 | 18/19 + 1 n/a | fully covered |
 | Stable 0.0.128–0.0.135 | 18/19 + 1 n/a | includes the build upstream last targeted, where every resolved offset matches its hardcoded table exactly |
@@ -190,6 +191,11 @@ A site marked n/a is one this build does not need — either because another
 patch already covers it, or because the construct it targets does not exist
 here. Reporting those as failures would overstate how badly the catalogue has
 aged.
+
+1.0.157 changed one register: the frame pointer that `CapturedAudioProcessor::Process`
+passes to `AudioFrame::muted()` moved from `r14` to `r15`, which is enough to
+miss a signature that carried the call setup. The mono-downmix site lists both
+encodings now. Nothing else in the catalogue moved.
 
 1.0.155 rebuilt a good deal of the audio path. Both Opus config constructors are
 inlined into their callers' stack frames (hence a second signature for the
