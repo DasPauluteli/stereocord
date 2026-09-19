@@ -7,7 +7,9 @@
 # stereocord
 
 Forces true stereo, 48 kHz and a high Opus bitrate in Discord's Linux voice
-module by patching `discord_voice.node`.
+module by patching `discord_voice.node`, and switches off the noise suppression,
+automatic gain and echo cancellation that would otherwise reshape the signal
+before it is ever encoded. Everything is grouped and optional.
 
 A Rust reimplementation of the Linux half of ProdHallow's
 [Discord-Stereo-Windows-MacOS-Linux](https://github.com/ProdHallow/Discord-Stereo-Windows-MacOS-Linux),
@@ -16,14 +18,40 @@ set of patches, located differently.
 
 ## What it changes
 
-| Group | Effect |
-| --- | --- |
-| stereo | SDP offers `stereo=1`; capture frames pinned to 2 channels; the capture-side mono downmix and the channel-downmix helper are bypassed; both Opus config constructors default to 2 channels |
-| samplerate | 48 kHz on both arms of Discord's rate selection, instead of 32 kHz below the quality threshold |
-| bitrate | 248 kbps (configurable) written into both config constructors *and* into the one wrapper every `opus_encoder_ctl(OPUS_SET_BITRATE)` call goes through, so nothing can walk it back |
-| opus | 10 ms frames, `OPUS_APPLICATION_AUDIO` instead of VOIP, and config validation accepts the combination |
-| celt | `MODE_CELT_ONLY` forced, so the encoder cannot drop into SILK/hybrid and reintroduce a low-pass or fold to mono |
-| filter | WebRTC's high-pass filter returns immediately; libopus' `hp_cutoff` and `dc_reject` are replaced with a pass-through |
+Patches are organised into groups you switch on and off. `patch` opens a picker;
+`stereocord groups` prints the same descriptions as plain text.
+
+| Group | On by default | Effect |
+| --- | :---: | --- |
+| stereo | yes | SDP offers `stereo=1`; capture frames pinned to 2 channels; the capture-side mono downmix and the channel-downmix helper are bypassed; both Opus config constructors default to 2 channels; the audio network adaptor cannot drop the encoder to mono mid-call |
+| samplerate | yes | 48 kHz on both arms of Discord's rate selection, instead of 32 kHz below the quality threshold |
+| bitrate | yes | 248 kbps (configurable) written into both config constructors *and* into the one wrapper every `opus_encoder_ctl(OPUS_SET_BITRATE)` call goes through, so nothing can walk it back |
+| opus | yes | `OPUS_APPLICATION_AUDIO` instead of VOIP, and config validation accepts the combination. Frame size is left at the stock 20 ms — see below |
+| celt | yes | `MODE_CELT_ONLY` forced, so the encoder cannot drop into SILK/hybrid and reintroduce a low-pass or fold to mono |
+| encoder | yes | complexity 10, coded bandwidth pinned to fullband, packet-loss hint pinned to 0%, inband FEC and DTX never enabled, and the network adaptor cannot change the frame length mid-call |
+| filter | yes | WebRTC's high-pass filter returns immediately; libopus' `hp_cutoff` and `dc_reject` are replaced with a pass-through |
+| gain | yes | AGC1, AGC2, the adaptive digital stage and the input-volume controller all return at entry, so nothing rides your level or moves your system input slider |
+| denoise | yes | `NoiseSuppressor::Analyze` and `::Process` return at entry |
+| echo | yes | AEC3's capture path returns at entry. **Headphones only** — on speakers everyone else hears themselves echo back |
+| cbr | no | `WebRtcOpus_DisableCbr` can no longer re-enable variable bitrate |
+
+The first seven decide how your audio is encoded. `gain`, `denoise` and `echo`
+are about what WebRTC's audio processing would otherwise do to the signal on the
+way in — levelling it, gating it, and subtracting an echo estimate from it — none
+of which is recoverable afterwards. They are on by default because leaving the
+signal alone is the point of the tool, not because they are always what you want:
+`echo` in particular is only safe on headphones.
+
+### Why there is no frame-size patch
+
+Upstream forced 10 ms Opus frames. That was a workaround for its own bitrate
+handling, not a quality setting, and on Linux it costs more than it buys. At a
+fixed bitrate a 10 ms frame carries the same per-frame side information — TOC
+byte, coarse energy, band allocation — over half as many samples, and it doubles
+the packet rate, so RTP + crypto tag + UDP + IP overhead rises from roughly
+25 kbps to roughly 50 kbps on top of the payload. The only thing it buys is about
+10 ms of latency. The stock 20 ms is already the right value, so nothing is
+written.
 
 ## Usage
 
@@ -36,13 +64,19 @@ cargo build --release
 ```
 
 `scan` lists every Discord install, marks the one Discord will actually launch,
-and reports whether each of the 18 patch sites can be located in that build.
+and reports whether each of the 37 patch sites can be located in that build.
 Run it before patching — if a site is missing, say so rather than patching
 around it.
 
 ```bash
 ./target/release/stereocord patch
 ```
+
+This opens a picker: arrow keys to move, space to toggle a group, enter to apply.
+Each group shows a plain-language summary and how many of its changes were found
+in your build. Pass `--groups stereo,bitrate` (or `--groups all`) to skip the
+picker, and `--yes` to take the defaults without being asked. Without a terminal
+— a script, a pipe — it falls back to the defaults rather than failing.
 
 Close Discord first. `patch` backs the module up, applies the edits, reads the
 file back and verifies every byte landed. `--dry-run` shows the plan without
@@ -60,10 +94,12 @@ Other commands: `backups` lists what is on record, `shellcode` prints the
 injected filter replacements as bytes, `scan --node <path>` inspects an
 arbitrary `discord_voice.node` without touching any install.
 
-Useful options: `-b/--bitrate <kbps>` (8–512, default 248), `-g/--gain <factor>`
-applied by the injected filters, `-c/--client <text>` to narrow to one install,
-`-a/--all` for every install rather than the newest per channel, `--allow-partial`
-to apply the sites that did resolve on a build where some did not.
+Useful options: `-g/--groups <list>` to choose groups without the picker
+(`--groups all` selects every one), `-b/--bitrate <kbps>` (8–512, default 248),
+`--gain <factor>` applied by the injected filters, `-c/--client <text>` to narrow
+to one install, `-a/--all` for every install rather than the newest per channel,
+`--allow-partial` to apply the sites that did resolve on a build where some did
+not.
 
 <!-- roundtrip:begin -->
 ## Before & after
@@ -104,7 +140,9 @@ was put in.
 The two charted cases are shaped like the capture above, so the pair should
 look alike: full band on both arms, differing in channel count and in the low
 end. A third case, not charted, is band-limited to 7.8 kHz to give the
-bandwidth measurement a known cutoff to recover.
+bandwidth measurement a known edge to recover: a 12th-order low-pass there
+crosses the -20 dB line the measurement looks for at 11.4 kHz, and the analysis
+finds 11.3 kHz.
 
 ## Which clients can hear it
 
@@ -129,7 +167,7 @@ measurement: the result comes back mono and looks like the patch failed.
 
 The long-form documentation lives in [the wiki](https://github.com/DasPauluteli/stereocord/wiki):
 
-- [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works) — how sites are located and validated, and what the injected filters do
+- [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works) — how sites are located and validated, what the injected filters do, why there is no frame-size patch, and what Discord's capture-side processing does to the signal
 - [Measuring](https://github.com/DasPauluteli/stereocord/wiki/Measuring) — measuring the round trip through a real call
 
 ## How it differs from the original
@@ -137,10 +175,12 @@ The long-form documentation lives in [the wiki](https://github.com/DasPauluteli/
 **Sites are found by symbol first, signature second.** Every
 `discord_voice.node` seen so far ships a full `.symtab` — around 64k function
 symbols, covering the bundled Opus and WebRTC code by name and Discord's own C++
-under its mangled names. Five sites are just a function entry, so a symbol
+under its mangled names. Seventeen sites are just a function entry, so a symbol
 lookup is the whole job; the rest search a signature scoped to one named
 function, which cannot match twice. A stripped build falls back to scanning the
-whole file, which is why the signature catalogue is carried for every site.
+whole file, which is why a signature is carried for almost every site — the
+exception is the capture-processing bypasses, whose bodies are too large and too
+build-specific for any signature that would be safe to also be worth carrying.
 `scan -v` reports how each site was resolved (`symbol`, `sig in <fn>`, `scan`).
 
 **Signatures rather than hardcoded offsets.** The upstream project
@@ -153,8 +193,9 @@ apply cleanly to a binary the rest of the client was never paired with.
 Here each site is located by scanning for the instructions around it, so the
 catalogue keeps working across builds and the module the user actually has is
 the one that gets patched. Where a code sequence was rewritten between builds
-the site simply lists both encodings; two sites in the capture path currently
-need this. Nothing is ever downloaded.
+the site simply lists both encodings, and where a function changed signature
+without changing behaviour the site lists both mangled names. Six sites need one
+or the other today. Nothing is ever downloaded.
 
 **No compiler at install time.** Upstream generated a C++ file, compiled it with
 whatever `g++`/`clang++` the machine had, and copied the resulting function
@@ -180,11 +221,16 @@ the newest install per channel that has a module.
 
 | Build | Sites | Notes |
 | --- | --- | --- |
-| Stable 1.0.157 | 15/19 + 4 n/a | fully covered |
-| Stable 1.0.155 | 15/19 + 4 n/a | fully covered |
-| Stable 1.0.153 | 18/19 + 1 n/a | fully covered |
+| Stable 1.0.158 | 33/37 + 4 n/a | fully covered |
+| Stable 1.0.157 | 33/37 + 4 n/a | fully covered |
+| Stable 1.0.155 | 33/37 + 4 n/a | fully covered |
+| Stable 1.0.153 | 36/37 + 1 n/a | fully covered |
 | Stable 0.0.128–0.0.135 | 18/19 + 1 n/a | includes the build upstream last targeted, where every resolved offset matches its hardcoded table exactly |
 | Stable 0.0.109, Canary 0.0.783 | 17/19 | mono-downmix site predates the code shape |
+
+The two 0.0.x rows are out of 19, not 37: they predate the network-adaptor,
+encoder-lock and capture-processing sites and have not been re-scanned since, so
+their coverage of those is unverified.
 
 Not every site applies to every build, and "n/a" is different from "missing".
 A site marked n/a is one this build does not need — either because another
@@ -206,8 +252,9 @@ That leaves no function to replace, so both filters are handled differently
 there — see [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works).
 
 Sites are marked critical or not. The critical ones decide whether audio is mono
-or stereo; the rest are quality refinements (bitrate, framing, CELT, filter
-bypass). When only non-critical sites are missing the tool proceeds and says so.
+or stereo; the rest are quality refinements (bitrate, CELT, the encoder locks,
+and the filter and capture-processing bypasses). When only non-critical sites are
+missing the tool proceeds and says so.
 When a critical one is missing it refuses unless `--allow-partial` is passed,
 because a client that negotiates stereo and still sends one channel is worse
 than one that does neither.

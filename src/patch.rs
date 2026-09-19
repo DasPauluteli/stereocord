@@ -20,17 +20,28 @@ use crate::sites::{Action, SITES};
 pub struct Config {
     pub bitrate_kbps: u32,
     pub gain: f32,
+    /// Groups the user left switched on. Sites outside these are located and
+    /// reported as usual, but nothing is written for them.
+    pub groups: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { bitrate_kbps: 248, gain: 1.0 }
+        Config {
+            bitrate_kbps: 248,
+            gain: 1.0,
+            groups: crate::sites::default_groups().iter().map(|g| g.to_string()).collect(),
+        }
     }
 }
 
 impl Config {
     pub fn bitrate_bps(&self) -> u32 {
         self.bitrate_kbps * 1000
+    }
+
+    pub fn wants(&self, group: &str) -> bool {
+        self.groups.iter().any(|g| g == group)
     }
 }
 
@@ -71,6 +82,9 @@ pub fn build(report: &Report, cfg: &Config, data: &[u8]) -> Plan {
     let mut edits = Vec::new();
 
     for site in SITES {
+        if !cfg.wants(site.group) {
+            continue;
+        }
         let Some(resolved) = report.resolved(site.name) else { continue };
         for &offset in &resolved.offsets {
             let bytes = match site.action {
@@ -86,6 +100,12 @@ pub fn build(report: &Report, cfg: &Config, data: &[u8]) -> Plan {
                     let mut v = vec![0x55, 0xBA];
                     v.extend_from_slice(&bitrate);
                     v
+                }
+                Action::CtlArg(v) => {
+                    // push rbp ; mov edx, <v>  — see Action::BitrateSetter.
+                    let mut b = vec![0x55, 0xBA];
+                    b.extend_from_slice(&(v as u32).to_le_bytes());
+                    b
                 }
                 Action::ShellcodeHpCutoff => shellcode::hp_cutoff(cfg.gain),
                 Action::ShellcodeDcReject => shellcode::dc_reject(cfg.gain),

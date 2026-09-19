@@ -34,6 +34,12 @@ pub enum Action {
     /// Overwrite with `push rbp; mov edx, <bitrate>`, forcing the argument of
     /// every `opus_encoder_ctl(OPUS_SET_BITRATE)` call in the module.
     BitrateSetter,
+    /// The same six-byte prologue rewrite as [`Action::BitrateSetter`], but with
+    /// a constant instead of the configured bitrate. Every `WebRtcOpus_Set*`
+    /// wrapper is the same shape — `push rbp; mov rbp,rsp; mov edx,esi` in front
+    /// of one `opus_encoder_ctl(inst, <request>, edx)` — so pinning `edx` pins
+    /// that setting for every caller in the module.
+    CtlArg(i32),
     /// Overwrite with the injected filter replacement.
     ShellcodeHpCutoff,
     /// Overwrite with the injected filter replacement.
@@ -93,6 +99,13 @@ pub struct Site {
     /// fallback for a stripped binary.
     pub entry: bool,
     /// Alternative encodings, tried in order; the first that matches wins.
+    ///
+    /// Empty means symbol-only. The capture-processing bypasses use that: they
+    /// replace whole function bodies that are large, heavily inlined and
+    /// different in every build, so any prologue signature specific enough to
+    /// be safe would also be too brittle to be worth carrying. Every build seen
+    /// so far ships a full `.symtab`; on one that does not, these report
+    /// MISSING and, being non-critical, the rest of the patch still applies.
     pub patterns: &'static [(&'static str, usize)],
     pub action: Action,
     /// The bytes a stock build has here, where that is unambiguous. Used to
@@ -119,6 +132,34 @@ const SYM_OPUS_CONFIG_CTOR: &str = "_ZN6webrtc22AudioEncoderOpusConfigC2Ev";
 const SYM_MULTICHANNEL_CTOR: &str = "_ZN6webrtc34AudioEncoderMultiChannelOpusConfigC2Ev";
 const SYM_OPUS_CONFIG_ISOK: &str = "_ZNK6webrtc22AudioEncoderOpusConfig4IsOkEv";
 const SYM_HIGHPASS_PROCESS: &str = "_ZN6webrtc14HighPassFilter7ProcessEPNS_11AudioBufferEb";
+const SYM_GAIN_CONTROLLER2: &str = "_ZN6webrtc15GainController27ProcessEbPNS_11AudioBufferE";
+/// 1.0.153 took the analog level as a leading `optional<float>`. Same function,
+/// still void, so the same `ret` applies.
+const SYM_GAIN_CONTROLLER2_OLD: &str =
+    "_ZN6webrtc15GainController27ProcessENSt4__Cr8optionalIfEEbPNS_11AudioBufferE";
+const SYM_AGC_PRE_PROCESS: &str =
+    "_ZN6webrtc16AgcManagerDirect17AnalyzePreProcessERKNS_11AudioBufferE";
+const SYM_AGC_DIGITAL_SETUP: &str =
+    "_ZNK6webrtc16AgcManagerDirect23SetupDigitalGainControlERNS_11GainControlE";
+const SYM_MONO_AGC_PROCESS: &str =
+    "_ZN6webrtc7MonoAgc7ProcessENS_9ArrayViewIKsLln4711EEENSt4__Cr8optionalIiEE";
+/// Before `rtc::ArrayView` was folded into the `webrtc` namespace.
+const SYM_MONO_AGC_PROCESS_OLD: &str =
+    "_ZN6webrtc7MonoAgc7ProcessEN3rtc9ArrayViewIKsLln4711EEENSt4__Cr8optionalIiEE";
+const SYM_MONO_AGC_CLIPPING: &str = "_ZN6webrtc7MonoAgc14HandleClippingEi";
+const SYM_MONO_AGC_UPDATE_GAIN: &str = "_ZN6webrtc7MonoAgc10UpdateGainEi";
+const SYM_INPUT_VOLUME_ANALYZE: &str =
+    "_ZN6webrtc21InputVolumeController17AnalyzeInputAudioEiRKNS_11AudioBufferE";
+const SYM_ADAPTIVE_DIGITAL_GAIN: &str =
+    "_ZN6webrtc29AdaptiveDigitalGainController7ProcessERKNS0_9FrameInfoENS_17DeinterleavedViewIfEE";
+const SYM_NS_PROCESS: &str = "_ZN6webrtc15NoiseSuppressor7ProcessEPNS_11AudioBufferE";
+const SYM_NS_ANALYZE: &str = "_ZN6webrtc15NoiseSuppressor7AnalyzeERKNS_11AudioBufferE";
+const SYM_AEC3_PROCESS_CAPTURE: &str =
+    "_ZN6webrtc14EchoCanceller314ProcessCaptureEPNS_11AudioBufferES2_b";
+const SYM_FRAME_LENGTH_DECISION: &str =
+    "_ZN6webrtc21FrameLengthController12MakeDecisionEPNS_25AudioEncoderRuntimeConfigE";
+const SYM_CHANNEL_MAKE_DECISION: &str =
+    "_ZN6webrtc17ChannelController12MakeDecisionEPNS_25AudioEncoderRuntimeConfigE";
 
 /// `mov r12, 2` — same length as the `cmp`/`cmovae` pair it replaces.
 const FORCE_TWO_CHANNELS: &[u8] = &[0x49, 0xC7, 0xC4, 0x02, 0x00, 0x00, 0x00];
@@ -127,6 +168,9 @@ const FORCE_TWO_CHANNELS: &[u8] = &[0x49, 0xC7, 0xC4, 0x02, 0x00, 0x00, 0x00];
 const NOP12_JMP: &[u8] = &[
     0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xE9,
 ];
+/// Two `nop`s, used to delete a two-byte conditional jump and leave whatever
+/// follows it to run.
+const NOP2: &[u8] = &[0x90, 0x90];
 /// `mov rax, 1; ret`
 const RETURN_TRUE: &[u8] = &[0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, 0xC3];
 /// 48000, little endian.
@@ -134,6 +178,140 @@ const SR_48K: &[u8] = &[0x80, 0xBB, 0x00, 0x00];
 /// `MODE_CELT_ONLY`, little endian.
 const CELT_ONLY: &[u8] = &[0xEA, 0x03, 0x00, 0x00];
 const RET: &[u8] = &[0xC3];
+/// `push rbp; mov rbp,rsp; mov edx,esi` — the prologue every `WebRtcOpus_Set*`
+/// wrapper shares, and what [`Action::CtlArg`] and [`Action::BitrateSetter`]
+/// overwrite with `push rbp; mov edx, <constant>`.
+const CTL_PROLOGUE: &[u8] = &[0x55, 0x48, 0x89, 0xE5, 0x89, 0xF2];
+
+/// A group of sites the user turns on or off as one unit.
+///
+/// The catalogue is organised by what the machine code does; this is organised
+/// by what the person sitting there is choosing. Every site belongs to exactly
+/// one group, and the summary has to make sense to someone who has never heard
+/// of Opus.
+pub struct Group {
+    pub name: &'static str,
+    /// Short label for the picker.
+    pub title: &'static str,
+    /// What this does to your audio, in plain words.
+    pub summary: &'static str,
+    /// Shown under the summary when the choice has a catch worth knowing.
+    pub caveat: Option<&'static str>,
+    /// Whether it is on unless the user says otherwise. On for everything that
+    /// gets the signal through untouched; off for anything that is a trade.
+    pub default_on: bool,
+}
+
+/// Picker order: what gets sent, then how it is encoded, then what Discord
+/// would otherwise do to the signal on the way in.
+pub static GROUPS: &[Group] = &[
+    Group {
+        name: "stereo",
+        title: "True stereo",
+        summary: "Sends left and right as separate channels instead of mixing them \
+                  into one. This is the main reason to use stereocord.",
+        caveat: Some("A mono microphone still gives you two identical channels."),
+        default_on: true,
+    },
+    Group {
+        name: "samplerate",
+        title: "Full 48 kHz",
+        summary: "Keeps the full sample rate instead of dropping to 32 kHz, which \
+                  throws away the top of the treble.",
+        caveat: None,
+        default_on: true,
+    },
+    Group {
+        name: "bitrate",
+        title: "High bitrate",
+        summary: "Raises how much data each second of audio may use, far above what \
+                  Discord normally allows. Choose the amount with --bitrate.",
+        caveat: None,
+        default_on: true,
+    },
+    Group {
+        name: "opus",
+        title: "Music mode",
+        summary: "Tells the encoder it is handling music rather than a phone call, \
+                  and lets it accept the settings above.",
+        caveat: None,
+        default_on: true,
+    },
+    Group {
+        name: "celt",
+        title: "Stay in music mode",
+        summary: "Stops the encoder switching to its speech mode partway through, \
+                  which would fold the stereo image down and cut the highs.",
+        caveat: None,
+        default_on: true,
+    },
+    Group {
+        name: "encoder",
+        title: "Encoder pinned wide open",
+        summary: "Quality dial to maximum and the full frequency range, and stops \
+                  Discord spending part of your bitrate on error correction, \
+                  silence detection, or shorter frames when the network dips.",
+        caveat: None,
+        default_on: true,
+    },
+    Group {
+        name: "filter",
+        title: "No bass filtering",
+        summary: "Removes the filters that cut the low end out of your signal before \
+                  it reaches the encoder.",
+        caveat: None,
+        default_on: true,
+    },
+    Group {
+        name: "gain",
+        title: "No automatic volume",
+        summary: "Stops Discord riding your volume up and down on its own, and stops \
+                  it moving your system input slider. Your level goes out the way \
+                  you set it.",
+        caveat: Some("Set your input level yourself; nothing will rescue a quiet or \
+                      clipping source."),
+        default_on: true,
+    },
+    Group {
+        name: "denoise",
+        title: "No noise removal",
+        summary: "Turns off noise suppression. It is tuned for speech and treats \
+                  quiet detail — room tone, reverb tails, fade-outs — as noise to \
+                  be deleted.",
+        caveat: Some("Steady background noise in your room will now be audible to \
+                      everyone."),
+        default_on: true,
+    },
+    Group {
+        name: "echo",
+        title: "No echo cancellation",
+        summary: "Turns off the echo canceller, which subtracts a guess at what your \
+                  speakers are playing from what your microphone hears. It is the \
+                  most destructive thing in the chain for music.",
+        caveat: Some("Headphones only. On speakers, everyone else will hear \
+                      themselves echoing back."),
+        default_on: true,
+    },
+    Group {
+        name: "cbr",
+        title: "Constant bitrate",
+        summary: "Sends the same amount of data every moment instead of easing off \
+                  during quiet passages. Steadier on the network, not better \
+                  sounding.",
+        caveat: Some("Off by default: it uses noticeably more bandwidth for no gain \
+                      in quality."),
+        default_on: false,
+    },
+];
+
+/// The groups that are on when nobody has said otherwise.
+pub fn default_groups() -> Vec<&'static str> {
+    GROUPS.iter().filter(|g| g.default_on).map(|g| g.name).collect()
+}
+
+pub fn group(name: &str) -> Option<&'static Group> {
+    GROUPS.iter().find(|g| g.name == name)
+}
 
 pub static SITES: &[Site] = &[
     // ---- stereo ------------------------------------------------------------
@@ -254,6 +432,53 @@ pub static SITES: &[Site] = &[
         stock: &[0x01],
         expect_orig: &[&[0x01], &[0x02]],
     },
+    Site {
+        name: "ChannelController_ForceStereo",
+        group: "stereo",
+        what: "network adaptor cannot drop the encoder to mono mid-call",
+        // The one site here that acts during a call rather than before it.
+        //
+        // When signalling supplies an `audio_network_adaptor_config` that names
+        // a ChannelController, `ChannelController::MakeDecision` is polled with
+        // the current uplink estimate. With two channels in flight it compares
+        // that estimate against `channel_2_to_1_bandwidth_bps` and, when the
+        // estimate is at or below it, commits one channel. The decision reaches
+        // the encoder as `opus_encoder_ctl(OPUS_SET_FORCE_CHANNELS, 1)`, and
+        // libopus then folds the two channels to (L+R)/2 internally. Nothing
+        // else in this catalogue covers that: the offer still carries stereo=1
+        // and the encoder still holds two channels, the adaptor has simply
+        // stopped using the second one.
+        //
+        // The edit is two `nop`s over the `jle` that commits the downgrade,
+        // leaving the `jmp` beneath it to exit with the count unchanged at 2.
+        // Deliberately not a pin of the written value: `OPUS_SET_FORCE_CHANNELS`
+        // rejects a count above the encoder's own channel count, and its caller
+        // treats that rejection as a fatal check. Removing only the downgrade
+        // leaves the upgrade path's `min(2, num_encoder_channels)` clamp intact,
+        // so on a build where the encoder really is mono this site changes
+        // nothing rather than aborting the client.
+        critical: false,
+        absent_ok: Some(Absent {
+            covered_by: None,
+            note: "no ChannelController in this build; MakeDecision is virtual and so \
+                   cannot be inlined away, and with neither the symbol nor the signature \
+                   present the network adaptor has no channel arm to downgrade with",
+        }),
+        expect: Expect::One,
+        symbols: &[SYM_CHANNEL_MAKE_DECISION],
+        entry: false,
+        // Byte-identical in every build seen so far, so the only wildcards are
+        // the two bytes being patched — which lets the site resolve on an
+        // already-patched module and act as a sentinel.
+        patterns: &[(
+            "48 8B 47 20 80 7F 2C 01 75 45 48 83 F8 01 74 1A 48 83 F8 02 75 39 \
+             8B 57 28 B9 01 00 00 00 B8 02 00 00 00 3B 57 1C ?? ?? EB 25",
+            38,
+        )],
+        action: Action::Bytes(NOP2),
+        stock: &[0x7E, 0x20],
+        expect_orig: &[&[0x7E, 0x20], NOP2],
+    },
     // ---- sample rate -------------------------------------------------------
     Site {
         name: "SelectSampleRate_48k",
@@ -329,33 +554,40 @@ pub static SITES: &[Site] = &[
         stock: &[0x55, 0x48, 0x89, 0xE5, 0x89, 0xF2],
         expect_orig: &[&[0x55, 0x48, 0x89, 0xE5, 0x89, 0xF2]],
     },
-    // ---- opus framing ------------------------------------------------------
-    Site {
-        name: "OpusConfig_FrameMs",
-        group: "opus",
-        what: "10 ms frames",
-        critical: false,
-        absent_ok: None,
-        expect: Expect::One,
-        symbols: &[SYM_OPUS_CONFIG_CTOR],
-        entry: false,
-        patterns: &[(OPUS_CONFIG_CTOR, 6), (OPUS_CONFIG_CTOR_INLINED, 2)],
-        action: Action::Bytes(&[0x0A]),
-        stock: &[0x14],
-        expect_orig: &[&[0x14], &[0x0A]],
-    },
+    // ---- opus ---------------------------------------------------------------
+    //
+    // There is deliberately no frame-size site. Upstream forced 10 ms frames;
+    // the stock 20 ms is the better setting and needs no patch. At a fixed
+    // bitrate a 10 ms frame spends the same per-frame side information (TOC
+    // byte, coarse energy, band allocation) over half as many samples, and it
+    // doubles the packet rate, so RTP + crypto tag + UDP + IP overhead goes
+    // from roughly 25 kbps to roughly 50 kbps on top of the payload. The only
+    // thing it buys is about 10 ms of latency.
     Site {
         name: "OpusConfig_Application",
         group: "opus",
         what: "OPUS_APPLICATION_AUDIO instead of VOIP",
+        // `application` is the int at offset 0x10 of AudioEncoderOpusConfig,
+        // written as the low half of the same `movabs` that carries the default
+        // bitrate in its high half. `WebRtcOpus_EncoderCreate` maps 0 to
+        // OPUS_APPLICATION_VOIP (2048) and 1 to OPUS_APPLICATION_AUDIO (2049).
+        //
+        // Not the byte at 0x18, which is four bytes further along and looks
+        // like a mode flag but is the engaged flag of the
+        // `std::optional<int> bitrate_bps` that starts at 0x14 — stock 1, so
+        // writing 1 there changes nothing and leaves the encoder in VOIP mode.
+        // The field order is frame_size_ms(0x00), sample_rate_hz(0x04),
+        // num_channels(0x08), application(0x10), bitrate value(0x14),
+        // bitrate engaged(0x18); `IsOk` reading `cmpb $1, 0x18(%rdi)` as its
+        // "has a bitrate" test is the cheapest confirmation of that layout.
         critical: false,
         absent_ok: None,
         expect: Expect::One,
         symbols: &[SYM_OPUS_CONFIG_CTOR],
         entry: false,
-        patterns: &[(OPUS_CONFIG_CTOR, 0x2A), (OPUS_CONFIG_CTOR_INLINED, 51)],
+        patterns: &[(OPUS_CONFIG_CTOR, 27), (OPUS_CONFIG_CTOR_INLINED, 30)],
         action: Action::Bytes(&[0x01]),
-        stock: &[],
+        stock: &[0x00],
         expect_orig: &[&[0x00], &[0x01]],
     },
     Site {
@@ -376,6 +608,357 @@ pub static SITES: &[Site] = &[
         action: Action::Bytes(RETURN_TRUE),
         stock: &[],
         expect_orig: &[&[0x55, 0x48, 0x89, 0xE5, 0x8B, 0x0F, 0x31, 0xC0], RETURN_TRUE],
+    },
+    // ---- capture-side processing ---------------------------------------------
+    //
+    // Everything above shapes how the signal is encoded. This block is about
+    // what WebRTC's audio processing module does to the signal on the way in,
+    // before the encoder ever sees it: levelling it, gating it, and subtracting
+    // an echo estimate from it. None of that is recoverable afterwards.
+    //
+    // Each of these is replaced with a bare `ret` at its entry. They all return
+    // void and none of them is the only writer of anything downstream reads, so
+    // returning early leaves the capture buffer exactly as it arrived — which
+    // is the whole point. `expect_orig` is empty because the prologues differ
+    // per build and the symbol is what located them; the resolved address is a
+    // function entry by construction, not a signature guess.
+    Site {
+        name: "GainController2_Bypass",
+        group: "gain",
+        what: "AGC2 leaves the signal alone",
+        // The current automatic gain control. Rides the level up and down,
+        // which on music is audible pumping.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_GAIN_CONTROLLER2, SYM_GAIN_CONTROLLER2_OLD],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "AgcPreAnalysis_Bypass",
+        group: "gain",
+        what: "AGC pre-analysis does not run",
+        // Watches for clipping and drives the input-volume recommendation.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_AGC_PRE_PROCESS],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "AgcDigitalSetup_Bypass",
+        group: "gain",
+        what: "legacy AGC digital compression not configured",
+        // Installs the legacy AGC1 digital compression curve.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_AGC_DIGITAL_SETUP],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "MonoAgcProcess_Bypass",
+        group: "gain",
+        what: "per-channel AGC does not run",
+        // AGC1's per-channel worker: the thing that actually decides a gain.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_MONO_AGC_PROCESS, SYM_MONO_AGC_PROCESS_OLD],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "MonoAgcClipping_Bypass",
+        group: "gain",
+        what: "AGC does not react to clipping",
+        // Reacts to clipping by yanking the level down and holding it there.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_MONO_AGC_CLIPPING],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "MonoAgcUpdateGain_Bypass",
+        group: "gain",
+        what: "AGC gain never updated",
+        // The gain update itself, stubbed so a level already chosen cannot
+        // drift even if something else calls in.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_MONO_AGC_UPDATE_GAIN],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "InputVolumeAnalyze_Bypass",
+        group: "gain",
+        what: "input volume not driven from the signal",
+        // The newer input-volume controller, which moves the OS capture
+        // slider on your behalf.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_INPUT_VOLUME_ANALYZE],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "AdaptiveDigitalGain_Bypass",
+        group: "gain",
+        what: "adaptive digital gain does not run",
+        // AGC2's adaptive digital stage.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_ADAPTIVE_DIGITAL_GAIN],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "NoiseSuppressorProcess_Bypass",
+        group: "denoise",
+        what: "noise suppressor leaves the signal alone",
+        // Spectral subtraction. Removes steady noise, and with it room tone,
+        // reverb tails and the quiet end of anything else.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_NS_PROCESS],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "NoiseSuppressorAnalyze_Bypass",
+        group: "denoise",
+        what: "noise suppressor does not analyse",
+        // The analysis half. Stubbed as well so the estimator is not left
+        // running for a suppressor that never applies it.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_NS_ANALYZE],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    Site {
+        name: "EchoCanceller_Bypass",
+        group: "echo",
+        what: "echo canceller leaves the signal alone",
+        // AEC3's capture path. It subtracts an estimate of what your speakers
+        // are playing out of what your microphone picked up, and it is a
+        // nonlinear, adaptive estimate — on music it is the single most
+        // destructive thing in the chain.
+        //
+        // `ProcessCapture` is also what drains the render queue. Dropping it
+        // means the queue fills, but `RenderWriter::Insert` handles a full
+        // queue by discarding the frame — there is no check that aborts — so
+        // the cost is bounded and the memory does not grow.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &[SYM_AEC3_PROCESS_CAPTURE],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    // ---- encoder locks -------------------------------------------------------
+    //
+    // Every `WebRtcOpus_*` wrapper is a few instructions around a single
+    // `opus_encoder_ctl`, and each is called from several places (the encoder
+    // constructor, the SDP reconfigure path, and the network adaptor). Pinning
+    // the value at the wrapper covers all of them at once, the same way
+    // `WebRtcOpus_SetBitRate` already does for the bitrate, instead of chasing
+    // each caller. The request constant in the signature (`BE <req> 0F 00 00`)
+    // is what tells the otherwise identical wrappers apart.
+    Site {
+        name: "WebRtcOpus_PacketLoss_Zero",
+        group: "encoder",
+        what: "packet-loss hint pinned to 0%",
+        // OPUS_SET_PACKET_LOSS_PERC (4014). WebRTC feeds the measured uplink
+        // loss fraction in here; libopus answers by trading audio bits for
+        // error robustness — in CELT that is wider spreading and a more
+        // conservative allocation, so the effect is audible even with no SILK
+        // and no inband FEC. Pinning it to 0 keeps the whole budget on signal.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &["WebRtcOpus_SetPacketLossRate"],
+        entry: false,
+        patterns: &[(
+            "?? ?? ?? ?? ?? ?? 48 8B 07 48 85 C0 74 ?? 48 89 C7 BE AE 0F 00 00 31 C0 E8",
+            0,
+        )],
+        action: Action::CtlArg(0),
+        stock: CTL_PROLOGUE,
+        expect_orig: &[CTL_PROLOGUE],
+    },
+    Site {
+        name: "WebRtcOpus_Complexity_Max",
+        group: "encoder",
+        what: "encoder complexity pinned to 10",
+        // OPUS_SET_COMPLEXITY (4010). Discord ships 9; 10 is the maximum and
+        // costs only encoder CPU.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &["WebRtcOpus_SetComplexity"],
+        entry: false,
+        patterns: &[(
+            "?? ?? ?? ?? ?? ?? 48 8B 07 48 85 C0 74 ?? 48 89 C7 BE AA 0F 00 00 31 C0 E8",
+            0,
+        )],
+        action: Action::CtlArg(10),
+        stock: CTL_PROLOGUE,
+        expect_orig: &[CTL_PROLOGUE],
+    },
+    Site {
+        name: "WebRtcOpus_Bandwidth_Fullband",
+        group: "encoder",
+        what: "coded bandwidth pinned to fullband",
+        // OPUS_SET_BANDWIDTH (4008) with OPUS_BANDWIDTH_FULLBAND (1105), the
+        // full 20 kHz. Anything narrower is a low-pass by another name.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::One,
+        symbols: &["WebRtcOpus_SetBandwidth"],
+        entry: false,
+        patterns: &[(
+            "?? ?? ?? ?? ?? ?? 48 8B 07 48 85 C0 74 ?? 48 89 C7 BE A8 0F 00 00 31 C0 E8",
+            0,
+        )],
+        action: Action::CtlArg(1105),
+        stock: CTL_PROLOGUE,
+        expect_orig: &[CTL_PROLOGUE],
+    },
+    Site {
+        name: "WebRtcOpus_Fec_Off",
+        group: "encoder",
+        what: "inband FEC never enabled",
+        // OPUS_SET_INBAND_FEC (4012). The wrapper has no `mov edx,esi` to
+        // overwrite — it hardcodes 1 in each of its two arms — so the edit is
+        // that immediate instead of the prologue. FEC spends payload on
+        // redundancy that only pays off under loss; with CELT forced there is
+        // no SILK LBRR for it to carry anyway, so this is mostly belt and
+        // braces for a build where the CELT sites did not apply.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::All(2),
+        symbols: &["WebRtcOpus_EnableFec"],
+        entry: false,
+        patterns: &[("BE AC 0F 00 00 BA ?? 00 00 00 31 C0 E8", 6)],
+        action: Action::Bytes(&[0x00, 0x00, 0x00, 0x00]),
+        stock: &[0x01, 0x00, 0x00, 0x00],
+        expect_orig: &[&[0x01, 0x00, 0x00, 0x00], &[0x00, 0x00, 0x00, 0x00]],
+    },
+    Site {
+        name: "WebRtcOpus_Dtx_Off",
+        group: "encoder",
+        what: "DTX never enabled",
+        // OPUS_SET_DTX (4016), same two-armed shape as the FEC wrapper.
+        // Discontinuous transmission stops sending during what it judges to be
+        // silence, which on music is a gate that chews reverb tails and fades.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::All(2),
+        symbols: &["WebRtcOpus_EnableDtx"],
+        entry: false,
+        patterns: &[("BE B0 0F 00 00 BA ?? 00 00 00 31 C0 E8", 6)],
+        action: Action::Bytes(&[0x00, 0x00, 0x00, 0x00]),
+        stock: &[0x01, 0x00, 0x00, 0x00],
+        expect_orig: &[&[0x01, 0x00, 0x00, 0x00], &[0x00, 0x00, 0x00, 0x00]],
+    },
+    Site {
+        name: "FrameLength_Pin",
+        group: "encoder",
+        what: "network adaptor cannot change the frame length mid-call",
+        // The frame-length arm of the same audio network adaptor that
+        // `ChannelController_ForceStereo` deals with. Left alone it walks the
+        // encoder between 20 ms and 60 ms frames as the uplink estimate moves.
+        //
+        // Here a bare `ret` is enough, and is safer than editing the decision:
+        // `MakeDecision` returns void and its only effect is writing
+        // `frame_length_ms` into the runtime config. Never writing it leaves
+        // the optional disengaged, `ApplyAudioNetworkAdaptor` skips
+        // `SetFrameLength` entirely, and the encoder keeps the 20 ms it was
+        // constructed with.
+        critical: false,
+        absent_ok: Some(Absent {
+            covered_by: None,
+            note: "no FrameLengthController in this build, so the network adaptor has \
+                   no frame-length arm and the encoder keeps its configured 20 ms",
+        }),
+        expect: Expect::One,
+        symbols: &[SYM_FRAME_LENGTH_DECISION],
+        entry: true,
+        patterns: &[],
+        action: Action::Bytes(RET),
+        stock: &[],
+        expect_orig: &[],
+    },
+    // ---- constant bitrate ----------------------------------------------------
+    Site {
+        name: "WebRtcOpus_Cbr_Always",
+        group: "cbr",
+        what: "constant bitrate cannot be turned back off",
+        // OPUS_SET_VBR (4006), inverted: `WebRtcOpus_EnableCbr` already passes
+        // 0 (VBR off), so the only thing that can undo it is
+        // `WebRtcOpus_DisableCbr` passing 1. Turning that immediate into 0
+        // makes both wrappers agree on constant bitrate.
+        //
+        // Off by default, and the one group here that is not about leaving the
+        // signal alone: variable bitrate at a high ceiling already spends what
+        // a passage needs and no more, so constant bitrate mostly buys a
+        // steadier packet size at the cost of sending full rate through quiet
+        // material. Worth having when something downstream wants a predictable
+        // rate; not worth having by default.
+        critical: false,
+        absent_ok: None,
+        expect: Expect::All(2),
+        symbols: &["WebRtcOpus_DisableCbr"],
+        entry: false,
+        patterns: &[("BE A6 0F 00 00 BA ?? 00 00 00 31 C0 E8", 6)],
+        action: Action::Bytes(&[0x00, 0x00, 0x00, 0x00]),
+        stock: &[0x01, 0x00, 0x00, 0x00],
+        expect_orig: &[&[0x01, 0x00, 0x00, 0x00], &[0x00, 0x00, 0x00, 0x00]],
     },
     // ---- celt --------------------------------------------------------------
     Site {
@@ -531,4 +1114,68 @@ pub fn compile_patterns(site: &Site) -> Vec<Pattern> {
 
 pub fn find(name: &str) -> Option<&'static Site> {
     SITES.iter().find(|s| s.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_site_belongs_to_a_declared_group() {
+        for site in SITES {
+            assert!(
+                group(site.group).is_some(),
+                "site {} is in group {:?}, which is not in GROUPS",
+                site.name,
+                site.group
+            );
+        }
+    }
+
+    #[test]
+    fn every_group_has_at_least_one_site() {
+        for g in GROUPS {
+            assert!(
+                SITES.iter().any(|s| s.group == g.name),
+                "group {:?} has no sites",
+                g.name
+            );
+        }
+    }
+
+    #[test]
+    fn site_names_are_unique() {
+        for (i, a) in SITES.iter().enumerate() {
+            assert!(
+                !SITES[i + 1..].iter().any(|b| b.name == a.name),
+                "duplicate site name {:?}",
+                a.name
+            );
+        }
+    }
+
+    #[test]
+    fn patterns_compile_and_deltas_are_in_range() {
+        // Pattern::parse asserts on both; this just makes the whole catalogue
+        // get parsed once under `cargo test` rather than on a user's machine.
+        for site in SITES {
+            for p in compile_patterns(site) {
+                assert!(p.delta < p.toks.len(), "{}", site.name);
+            }
+        }
+    }
+
+    #[test]
+    fn anchors_refer_to_real_sites() {
+        for site in SITES {
+            if let Expect::NearestAfter { anchor, .. } = site.expect {
+                assert!(find(anchor).is_some(), "{} anchors on missing {}", site.name, anchor);
+            }
+            if let Some(a) = &site.absent_ok {
+                if let Some(other) = a.covered_by {
+                    assert!(find(other).is_some(), "{} covered_by missing {}", site.name, other);
+                }
+            }
+        }
+    }
 }

@@ -25,6 +25,7 @@ mod resolve;
 mod shellcode;
 mod sig;
 mod sites;
+mod tui;
 
 use discovery::Install;
 use patch::Config;
@@ -48,6 +49,7 @@ COMMANDS:
     patch               Apply the patches
     restore             Put the original module back from the backup
     backups             List backups on record
+    groups              List the patch groups and what each one does
     shellcode           Print the injected filter replacements as bytes
 
 OPTIONS:
@@ -56,16 +58,21 @@ OPTIONS:
     -a, --all             Act on every install, not just the newest per channel
                           that has a voice module
     -b, --bitrate <KBPS>  Opus bitrate to lock in           [default: 248]
-    -g, --gain <FACTOR>   Gain applied by the injected filters  [default: 1.0]
+        --gain <FACTOR>   Gain applied by the injected filters  [default: 1.0]
     -n, --dry-run         Say what would be written, write nothing
     -f, --force           Patch even while Discord is running
         --allow-partial   Patch even if some sites could not be located
-    -y, --yes             Do not ask for confirmation
+    -y, --yes             Do not ask for confirmation, and skip the picker
+    -g, --groups <LIST>   Comma-separated groups to apply, skipping the picker
+                          (see 'groups'); 'all' selects every group
     -v, --verbose         Show every resolved offset
         --node <PATH>     Scan this discord_voice.node instead of searching for
                           installs (useful for checking a build before patching)
     -h, --help            Show this message
     -V, --version         Show the version
+
+'patch' opens a picker so you can choose which groups to apply. Pass --groups
+or --yes to skip it; without a terminal it falls back to the defaults.
 
 Discord must be closed: a running client already has the old module mapped.
 ";
@@ -82,6 +89,7 @@ struct Args {
     yes: bool,
     verbose: bool,
     node: Option<String>,
+    groups: Option<Vec<String>>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -97,6 +105,7 @@ fn parse_args() -> Result<Args, String> {
         yes: false,
         verbose: false,
         node: None,
+        groups: None,
     };
 
     let mut it = std::env::args().skip(1).peekable();
@@ -119,9 +128,13 @@ fn parse_args() -> Result<Args, String> {
                 let v = value("--bitrate")?;
                 args.bitrate = v.parse().map_err(|_| format!("bad bitrate {v:?}"))?;
             }
-            "-g" | "--gain" => {
+            "--gain" => {
                 let v = value("--gain")?;
                 args.gain = v.parse().map_err(|_| format!("bad gain {v:?}"))?;
+            }
+            "-g" | "--groups" => {
+                let v = value("--groups")?;
+                args.groups = Some(parse_groups(&v)?);
             }
             "-n" | "--dry-run" => args.dry_run = true,
             "-f" | "--force" => args.force = true,
@@ -147,6 +160,35 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
+/// Parse a --groups value. `all` is spelled out rather than inferred so that a
+/// typo is an error instead of a silent no-op.
+fn parse_groups(spec: &str) -> Result<Vec<String>, String> {
+    if spec.trim() == "all" {
+        return Ok(sites::GROUPS.iter().map(|g| g.name.to_string()).collect());
+    }
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let name = part.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match sites::group(name) {
+            Some(g) => out.push(g.name.to_string()),
+            None => {
+                let known: Vec<&str> = sites::GROUPS.iter().map(|g| g.name).collect();
+                return Err(format!(
+                    "unknown group {name:?}; known groups are {}",
+                    known.join(", ")
+                ));
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("--groups selected nothing".to_string());
+    }
+    Ok(out)
+}
+
 fn main() -> ExitCode {
     let args = match parse_args() {
         Ok(a) => a,
@@ -155,13 +197,24 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let cfg = Config { bitrate_kbps: args.bitrate, gain: args.gain };
+    let cfg = Config {
+        bitrate_kbps: args.bitrate,
+        gain: args.gain,
+        groups: args
+            .groups
+            .clone()
+            .unwrap_or_else(|| sites::default_groups().iter().map(|g| g.to_string()).collect()),
+    };
 
     let result = match args.command.as_str() {
         "scan" => cmd_scan(&args),
         "patch" => cmd_patch(&args, &cfg),
         "restore" => cmd_restore(&args),
         "backups" => cmd_backups(),
+        "groups" => {
+            cmd_groups();
+            Ok(())
+        }
         "shellcode" => {
             print!("{}", shellcode::describe(cfg.gain));
             Ok(())
@@ -296,7 +349,7 @@ fn cmd_scan(args: &Args) -> Result<(), String> {
 /// A missing site that the build genuinely does not need, and why.
 ///
 /// Returns the explanation when absence is fine, `None` when it is a real gap.
-fn excused(name: &str, report: &resolve::Report) -> Option<&'static str> {
+pub(crate) fn excused(name: &str, report: &resolve::Report) -> Option<&'static str> {
     let site = sites::find(name)?;
     let absent = site.absent_ok.as_ref()?;
     match absent.covered_by {
@@ -560,7 +613,8 @@ fn patch_one(
             } else {
                 println!(
                     "  All stereo-critical sites resolved; the rest are quality\n  \
-                     refinements (bitrate, framing, CELT, filter bypass). Proceeding."
+                     refinements (bitrate, CELT, the encoder locks, and the filter\n  \
+                     and capture-processing bypasses). Proceeding."
                 );
             }
         } else {
@@ -569,6 +623,31 @@ fn patch_one(
     } else {
         println!("  all {} sites located", report.order.len());
     }
+
+    // The picker is the confirmation step when it runs: choosing the groups and
+    // pressing enter is the same decision the y/N prompt used to ask for, so
+    // asking again afterwards would just be a second prompt for one choice.
+    let mut cfg = cfg.clone();
+    let mut picked = false;
+    if args.groups.is_none() && !args.yes {
+        match tui::pick(&install.label(), &report, cfg.bitrate_kbps) {
+            Some(tui::Choice::Apply(groups)) => {
+                cfg.groups = groups;
+                picked = true;
+            }
+            Some(tui::Choice::Cancel) => {
+                println!("  cancelled");
+                return Ok(false);
+            }
+            // No terminal to draw on; the defaults already in cfg stand.
+            None => {}
+        }
+    }
+    if cfg.groups.is_empty() {
+        println!("  no groups selected; nothing to do");
+        return Ok(false);
+    }
+    let cfg = &cfg;
 
     let plan = patch::build(&report, cfg, &data);
     let errors = patch::check(&plan, &data);
@@ -589,8 +668,17 @@ fn patch_one(
     // overstatement that sent the last few hours sideways.
     let mut effects: Vec<String> = Vec::new();
     let has = |group: &str| plan.edits.iter().any(|e| e.group == group);
+    let applied = |name: &str| plan.edits.iter().any(|e| e.site == name);
     if has("stereo") {
-        effects.push("stereo".to_string());
+        // Say separately whether the network adaptor's mid-call downgrade is
+        // blocked. A build where that site did not apply still starts the call
+        // in stereo and can fall back to mono once the uplink estimate dips,
+        // which sounds like the patch wearing off rather than like what it is.
+        effects.push(if applied("ChannelController_ForceStereo") {
+            "stereo (held against the network adaptor)".to_string()
+        } else {
+            "stereo".to_string()
+        });
     }
     if has("samplerate") {
         effects.push("48 kHz".to_string());
@@ -599,16 +687,30 @@ fn patch_one(
         effects.push(format!("{} kbps", cfg.bitrate_kbps));
     }
     if has("opus") {
-        effects.push("10 ms frames".to_string());
+        effects.push("audio mode".to_string());
+    }
+    if has("encoder") {
+        effects.push("FEC/DTX off, complexity 10, fullband".to_string());
     }
     if has("celt") {
         effects.push("CELT".to_string());
+    }
+    if has("gain") {
+        effects.push("no auto-gain".to_string());
+    }
+    if has("denoise") {
+        effects.push("no noise removal".to_string());
+    }
+    if has("echo") {
+        effects.push("no echo cancellation".to_string());
+    }
+    if has("cbr") {
+        effects.push("constant bitrate".to_string());
     }
     // "Filterless" means both Opus input filters are out of the path. That can
     // happen three ways per filter: the function was replaced, its coefficient
     // was neutralised, or the build cannot reach it at all. Count all three,
     // otherwise a fully-bypassed build reports as a partial one.
-    let applied = |name: &str| plan.edits.iter().any(|e| e.site == name);
     let hp_done = applied("HpCutoff_Inject") || excused("HpCutoff_Inject", &report).is_some();
     let dc_done = applied("DcReject_Inject") || applied("DcReject_Coefficient");
     if hp_done && dc_done {
@@ -644,7 +746,7 @@ fn patch_one(
         return Ok(false);
     }
 
-    if !args.yes && !confirm(&format!("  Patch {}?", node.display()))? {
+    if !args.yes && !picked && !confirm(&format!("  Patch {}?", node.display()))? {
         println!("  skipped");
         return Ok(false);
     }
@@ -714,6 +816,51 @@ fn cmd_restore(args: &Args) -> Result<(), String> {
         println!("Nothing restored.");
     }
     Ok(())
+}
+
+/// The same text the picker shows, for anyone reading the tool rather than
+/// driving it.
+fn cmd_groups() {
+    // Written through a handle with the errors dropped rather than with
+    // `println!`, so `stereocord groups | head` closes the pipe quietly instead
+    // of panicking partway down the list.
+    let out = std::io::stdout();
+    let mut w = out.lock();
+    let _ = writeln!(w, "Patch groups. 'patch' asks which of these to apply; --groups picks");
+    let _ = writeln!(w, "them on the command line, and --groups all selects every one.\n");
+    for g in sites::GROUPS {
+        let n = sites::SITES.iter().filter(|s| s.group == g.name).count();
+        let plural = if n == 1 { "change" } else { "changes" };
+        let state = if g.default_on { "on by default" } else { "off by default" };
+        let _ = writeln!(w, "  {:<12} {}  ({n} {plural}, {state})", g.name, g.title);
+        for line in wrap_plain(g.summary, 70) {
+            let _ = writeln!(w, "               {line}");
+        }
+        if let Some(c) = g.caveat {
+            for line in wrap_plain(c, 70) {
+                let _ = writeln!(w, "               ! {line}");
+            }
+        }
+        let _ = writeln!(w);
+    }
+}
+
+fn wrap_plain(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 fn cmd_backups() -> Result<(), String> {
