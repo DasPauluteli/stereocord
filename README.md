@@ -11,10 +11,16 @@ module by patching `discord_voice.node`, and switches off the noise suppression,
 automatic gain and echo cancellation that would otherwise reshape the signal
 before it is ever encoded. Everything is grouped and optional.
 
-A Rust reimplementation of the Linux half of ProdHallow's
+It started as a Rust reimplementation of the Linux half of ProdHallow's
 [Discord-Stereo-Windows-MacOS-Linux](https://github.com/ProdHallow/Discord-Stereo-Windows-MacOS-Linux),
-which was discontinued in August 2026 (last functional commit `5e96ff0`). Same
-set of patches, located differently.
+which was discontinued in August 2026 (last functional commit `5e96ff0`), and it
+no longer matches that project's patch set. Sites have been added — the audio
+network adaptor's mid-call overrides, the encoder locks, and the whole
+capture-side processing group — one has been dropped as counterproductive (see
+[below](#why-there-is-no-frame-size-patch)), and one was found to have been
+writing to the wrong struct field all along. The later groups were informed by
+the patch list [sudocord](https://sudocord.dev) publishes; no code is shared
+between the two.
 
 ## What it changes
 
@@ -35,23 +41,23 @@ Patches are organised into groups you switch on and off. `patch` opens a picker;
 | echo | yes | AEC3's capture path returns at entry. **Headphones only** — on speakers everyone else hears themselves echo back |
 | cbr | no | `WebRtcOpus_DisableCbr` can no longer re-enable variable bitrate |
 
-The first seven decide how your audio is encoded. `gain`, `denoise` and `echo`
-are about what WebRTC's audio processing would otherwise do to the signal on the
-way in — levelling it, gating it, and subtracting an echo estimate from it — none
-of which is recoverable afterwards. They are on by default because leaving the
-signal alone is the point of the tool, not because they are always what you want:
-`echo` in particular is only safe on headphones.
+Everything except `gain`, `denoise` and `echo` decides how your audio is
+encoded. Those three are about what WebRTC's audio processing would otherwise do
+to the signal on the way in — levelling it, gating it, and subtracting an echo
+estimate from it — none of which is recoverable afterwards. They are on by
+default because leaving the signal alone is the point of the tool, not because
+they are always what you want: `echo` in particular is only safe on headphones.
 
 ### Why there is no frame-size patch
 
-Upstream forced 10 ms Opus frames. That was a workaround for its own bitrate
-handling, not a quality setting, and on Linux it costs more than it buys. At a
-fixed bitrate a 10 ms frame carries the same per-frame side information — TOC
-byte, coarse energy, band allocation — over half as many samples, and it doubles
-the packet rate, so RTP + crypto tag + UDP + IP overhead rises from roughly
-25 kbps to roughly 50 kbps on top of the payload. The only thing it buys is about
-10 ms of latency. The stock 20 ms is already the right value, so nothing is
-written.
+Upstream forced 10 ms Opus frames, and that was carried over here for a while
+without being re-examined. Whatever it was for, it is not a quality setting, and
+it costs more than it buys. At a fixed bitrate a 10 ms frame carries the same
+per-frame side information — TOC byte, coarse energy, band allocation — over half
+as many samples, and it doubles the packet rate, so RTP + crypto tag + UDP + IP
+overhead rises from roughly 25 kbps to roughly 50 kbps on top of the payload. The
+only thing it buys is about 10 ms of latency. The stock 20 ms is already the
+right value, so nothing is written.
 
 ## Usage
 
@@ -65,8 +71,8 @@ cargo build --release
 
 `scan` lists every Discord install, marks the one Discord will actually launch,
 and reports whether each of the 37 patch sites can be located in that build.
-Run it before patching — if a site is missing, say so rather than patching
-around it.
+Run it before patching: a site that cannot be located is reported as missing
+rather than quietly worked around.
 
 ```bash
 ./target/release/stereocord patch
@@ -90,9 +96,10 @@ Puts the original module back. Backups live in
 `~/.local/state/stereocord/backups/`, one per install, and are never
 overwritten by an already-patched copy.
 
-Other commands: `backups` lists what is on record, `shellcode` prints the
-injected filter replacements as bytes, `scan --node <path>` inspects an
-arbitrary `discord_voice.node` without touching any install.
+Other commands: `groups` prints every group and what it does, `backups` lists
+what is on record, `shellcode` prints the injected filter replacements as bytes,
+`scan --node <path>` inspects an arbitrary `discord_voice.node` without touching
+any install.
 
 Useful options: `-g/--groups <list>` to choose groups without the picker
 (`--groups all` selects every one), `-b/--bitrate <kbps>` (8–512, default 248),
@@ -123,6 +130,12 @@ patched — the receiving client is a stock, unmodified install. Measured with
 
 The headline number is the L/R correlation. Two channels carrying the same
 signal are mono however many channels the container claims.
+
+Captured 2026-09-01, against the patch catalogue as it stood then — a
+measurement describes the selection it was taken with, not necessarily the
+current defaults. This one predates the encoder locks and the capture-processing
+groups, so it is marked outdated on the chart itself and a re-measurement is
+pending.
 <!-- roundtrip:end -->
 
 ## Validating the measurement
@@ -173,7 +186,7 @@ The long-form documentation lives in [the wiki](https://github.com/DasPauluteli/
 ## How it differs from the original
 
 **Sites are found by symbol first, signature second.** Every
-`discord_voice.node` seen so far ships a full `.symtab` — around 64k function
+`discord_voice.node` seen so far ships a full `.symtab` — 51k to 55k function
 symbols, covering the bundled Opus and WebRTC code by name and Discord's own C++
 under its mangled names. Seventeen sites are just a function entry, so a symbol
 lookup is the whole job; the rest search a signature scoped to one named
@@ -194,8 +207,8 @@ Here each site is located by scanning for the instructions around it, so the
 catalogue keeps working across builds and the module the user actually has is
 the one that gets patched. Where a code sequence was rewritten between builds
 the site simply lists both encodings, and where a function changed signature
-without changing behaviour the site lists both mangled names. Six sites need one
-or the other today. Nothing is ever downloaded.
+without changing behaviour the site lists both mangled names. Eight sites need
+one or the other today. Nothing is ever downloaded.
 
 **No compiler at install time.** Upstream generated a C++ file, compiled it with
 whatever `g++`/`clang++` the machine had, and copied the resulting function
@@ -282,6 +295,12 @@ chart above, and it is a simulation rather than a Discord measurement.
 
 - A mono source still gives you two identical channels. Analysers report that as
   mono, correctly. Feed Discord a stereo input.
+- **The defaults turn off echo cancellation.** On headphones that is what you
+  want. On speakers, everyone else in the call will hear themselves echoing back
+  — untick `echo` in the picker, or leave it out of `--groups`.
+- Turning off noise suppression and automatic gain means your room and your
+  input level go out as they are. Set your level yourself; nothing downstream
+  will rescue a quiet or clipping source.
 - Patching a running client does nothing: the old module is already mapped. The
   tool refuses unless `--force` is given.
 - **A patched module blocks Discord's updates.** Discord ships voice-module

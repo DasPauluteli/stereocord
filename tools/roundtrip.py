@@ -843,9 +843,14 @@ def install_readme(readme, png, before, after):
     once a real measurement has been taken - a README referencing a chart that
     was never generated is worse than no section at all.
     """
+    import datetime
     import os
 
     rel = os.path.relpath(png, os.path.dirname(os.path.abspath(readme)) or ".")
+    # Stamped so the section carries its own provenance. A capture describes the
+    # catalogue as it stood when it was taken; without a date, a chart from six
+    # patch groups ago reads as a measurement of whatever the tool does today.
+    taken = datetime.date.today().isoformat()
 
     def cell(r, key, fmt):
         v = r.get(key) if r else None
@@ -879,6 +884,9 @@ patched — the receiving client is a stock, unmodified install. Measured with
 
 The headline number is the L/R correlation. Two channels carrying the same
 signal are mono however many channels the container claims.
+
+Captured {taken}, against the patch catalogue as it stood then — a measurement
+describes the selection it was taken with, not necessarily the current defaults.
 {END}"""
 
     text = open(readme).read()
