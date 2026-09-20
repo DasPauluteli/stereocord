@@ -11,20 +11,26 @@
 
 //! stereocord — stereo / high-bitrate patcher for Discord's Linux voice module.
 //!
-//! A Rust reimplementation of the Linux half of ProdHallow's
-//! Discord-Stereo-Windows-MacOS-Linux (discontinued, last commit 5e96ff0).
-//! Same patches, located by signature rather than by hardcoded offset, and
-//! applied to the module the machine actually has.
+//! Run it with no arguments and it opens a terminal interface: pick a client,
+//! read what its voice module is currently doing to your audio, and decide
+//! from there. Run it with a command and it behaves as a plain command-line
+//! tool, which is what scripts and the impatient want.
+//!
+//! Both paths meet in [`apply`], so there is exactly one implementation of
+//! what patching means.
 
+mod apply;
 mod backup;
 mod discovery;
 mod elf;
+mod manage;
 mod md5;
 mod patch;
 mod resolve;
 mod shellcode;
 mod sig;
 mod sites;
+mod status;
 mod tui;
 
 use discovery::Install;
@@ -35,17 +41,23 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "\
 stereocord — force stereo, 48 kHz and a high Opus bitrate in Discord on Linux
 
 USAGE:
+    stereocord                    Open the interface
     stereocord <COMMAND> [OPTIONS]
 
+Run with no arguments at all and stereocord opens a terminal interface: choose
+a client, see what its voice module is currently doing to your audio, and patch
+or restore from there. Everything below is the same work without the interface.
+
 COMMANDS:
-    scan                Show every Discord install, and whether each patch site
-                        can be located in its voice module  (default)
+    tui                 Open the interface (what running with no arguments does)
+    scan                Show every Discord install, what its module is doing,
+                        and whether each patch site can still be located
     patch               Apply the patches
     restore             Put the original module back from the backup
     backups             List backups on record
@@ -62,17 +74,15 @@ OPTIONS:
     -n, --dry-run         Say what would be written, write nothing
     -f, --force           Patch even while Discord is running
         --allow-partial   Patch even if some sites could not be located
-    -y, --yes             Do not ask for confirmation, and skip the picker
-    -g, --groups <LIST>   Comma-separated groups to apply, skipping the picker
-                          (see 'groups'); 'all' selects every group
+    -y, --yes             Do not ask for confirmation
+    -g, --groups <LIST>   Comma-separated groups to apply (see 'groups');
+                          'all' selects every group  [default: the recommended set]
     -v, --verbose         Show every resolved offset
-        --node <PATH>     Scan this discord_voice.node instead of searching for
-                          installs (useful for checking a build before patching)
+        --node <PATH>     Act on this discord_voice.node instead of searching
+                          for installs (useful for checking a build, or for a
+                          custom client using Discord's own module)
     -h, --help            Show this message
     -V, --version         Show the version
-
-'patch' opens a picker so you can choose which groups to apply. Pass --groups
-or --yes to skip it; without a terminal it falls back to the defaults.
 
 Discord must be closed: a running client already has the old module mapped.
 ";
@@ -148,8 +158,11 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
+    // No arguments at all means the interface. Options without a command still
+    // mean `scan`, so `stereocord --node <path>` keeps working the way it
+    // always has rather than silently opening a UI.
     if args.command.is_empty() {
-        args.command = "scan".to_string();
+        args.command = if std::env::args().len() == 1 { "tui" } else { "scan" }.to_string();
     }
     if !(8..=512).contains(&args.bitrate) {
         return Err(format!("bitrate {} kbps is outside 8-512", args.bitrate));
@@ -207,6 +220,7 @@ fn main() -> ExitCode {
     };
 
     let result = match args.command.as_str() {
+        "tui" => tui::run(args.bitrate, args.gain),
         "scan" => cmd_scan(&args),
         "patch" => cmd_patch(&args, &cfg),
         "restore" => cmd_restore(&args),
@@ -284,7 +298,7 @@ fn select(args: &Args) -> Result<Vec<Install>, String> {
 
 fn cmd_scan(args: &Args) -> Result<(), String> {
     if let Some(path) = &args.node {
-        return report_sites(Path::new(path), args.verbose);
+        return report_sites(Path::new(path), args.verbose, None);
     }
     let installs = discovery::find_installs();
     if installs.is_empty() {
@@ -341,22 +355,9 @@ fn cmd_scan(args: &Args) -> Result<(), String> {
     for install in select(args)? {
         let Some(node) = install.node.clone() else { continue };
         println!("\n--- {} ---", install.label());
-        report_sites(&node, args.verbose)?;
+        report_sites(&node, args.verbose, Some(&install))?;
     }
     Ok(())
-}
-
-/// A missing site that the build genuinely does not need, and why.
-///
-/// Returns the explanation when absence is fine, `None` when it is a real gap.
-pub(crate) fn excused(name: &str, report: &resolve::Report) -> Option<&'static str> {
-    let site = sites::find(name)?;
-    let absent = site.absent_ok.as_ref()?;
-    match absent.covered_by {
-        // Only excused if whatever covers it actually resolved.
-        Some(other) => report.resolved(other).map(|_| absent.note),
-        None => Some(absent.note),
-    }
 }
 
 fn newest_per_channel(installs: &[Install]) -> Vec<String> {
@@ -407,27 +408,45 @@ fn staged_updates(installs: &[Install]) -> Vec<(&Install, Option<String>)> {
         .collect()
 }
 
-fn report_sites(node: &Path, verbose: bool) -> Result<(), String> {
-    let data = read_node(node)?;
-    println!("  size {} bytes, md5 {}", data.len(), md5::hex(&data));
-
-    let syms = elf::symbols(&data);
-    match &syms {
-        Some(s) => println!("  symbols: {} functions", s.len()),
+/// What one module is, what it is doing, and whether the catalogue can still
+/// find its way around it — in that order, because the first two are what the
+/// person asked and the third is about the tool.
+fn report_sites(node: &Path, verbose: bool, install: Option<&Install>) -> Result<(), String> {
+    let facts = match install {
+        Some(i) => status::inspect_install(i, node)?,
+        None => status::inspect_path(node)?,
+    };
+    println!("  size {} bytes, md5 {}", facts.size, facts.md5);
+    match facts.symbols {
+        Some(n) => println!("  symbols: {n} functions"),
         None => println!("  symbols: none (stripped) - falling back to scanning"),
     }
-    let report = resolve::resolve_all(&data, syms.as_ref());
-    let state = patch::classify(&data, &report);
-    println!("  status: {state}");
-    let mut excused_count = 0usize;
-    if state == patch::State::Patched {
+    if facts.recognised() {
+        println!("  status: {}", facts.state);
+    } else {
         println!(
-            "  Most sites will read as MISSING below: their original instructions\n  \
-             have been overwritten, so there is nothing left to match. That is\n  \
-             expected for a patched module, not a fault. To re-scan properly, or to\n  \
-             re-patch, run 'stereocord restore' first."
+            "  status: unrecognised — not one site matched, so this is either not\n  Discord's voice module, or a build this version of stereocord has never seen"
         );
     }
+
+    println!("\n  What this module does to your audio");
+    for row in &facts.rows {
+        println!(
+            "    {} {:<22} {}",
+            status::plain_glyph(row.level),
+            row.label,
+            row.value
+        );
+    }
+    if facts.baseline == status::Baseline::SelfScan && facts.state != patch::State::Stock {
+        println!(
+            "\n  No backup is on record for this module, and a patch overwrites the\n  very bytes most signatures key on. So the lines above and below that say\n  they cannot be read are a limit of what is knowable here, not a fault in\n  the module. Restore it, or scan a stock copy, to see the rest."
+        );
+    }
+
+    println!("\n  Patch sites");
+    let report = &facts.report;
+    let mut excused_count = 0usize;
     let mut ok = 0;
     for name in &report.order {
         match report.outcomes.get(name) {
@@ -437,31 +456,31 @@ fn report_sites(node: &Path, verbose: bool) -> Result<(), String> {
                     let offsets: Vec<String> =
                         r.offsets.iter().map(|o| format!("0x{o:X}")).collect();
                     println!(
-                        "  ok      {:<30} {:<10} {:<20} {}",
+                        "    ok      {:<30} {:<10} {:<20} {}",
                         name,
                         r.site.group,
                         offsets.join(", "),
                         r.via
                     );
                     if r.variant > 0 {
-                        println!("          via alternative encoding #{}", r.variant + 1);
+                        println!("            via alternative encoding #{}", r.variant + 1);
                     }
                 }
             }
             Some(Outcome::Ambiguous { found, wanted }) => {
-                println!("  AMBIG   {name:<30} matched {found} times, expected {wanted}");
+                println!("    AMBIG   {name:<30} matched {found} times, expected {wanted}");
             }
-            _ => match excused(name, &report) {
+            _ => match report.excused(name) {
                 Some(note) => {
                     excused_count += 1;
-                    println!("  n/a     {name:<30} {note}");
+                    println!("    n/a     {name:<30} {note}");
                 }
-                None => println!("  MISSING {name:<30} no signature matched"),
+                None => println!("    MISSING {name:<30} no signature matched"),
             },
         }
     }
     let gaps = report.order.len() - ok - excused_count;
-    print!("  {ok}/{} sites located", report.order.len());
+    print!("    {ok}/{} sites located", report.order.len());
     if excused_count > 0 {
         print!(", {excused_count} not needed on this build");
     }
@@ -470,10 +489,6 @@ fn report_sites(node: &Path, verbose: bool) -> Result<(), String> {
     }
     println!();
     Ok(())
-}
-
-fn read_node(node: &Path) -> Result<Vec<u8>, String> {
-    fs::read(node).map_err(|e| format!("cannot read {}: {e}", node.display()))
 }
 
 fn cmd_patch(args: &Args, cfg: &Config) -> Result<(), String> {
@@ -541,192 +556,46 @@ fn patch_one(
     args: &Args,
     cfg: &Config,
 ) -> Result<bool, String> {
-    let mut data = read_node(node)?;
-    println!("  {} bytes, md5 {}", data.len(), md5::hex(&data));
-
-    let report0 = resolve::resolve_all(&data, elf::symbols(&data).as_ref());
-    let state = patch::classify(&data, &report0);
-
-    // Re-patching a patched binary would compound edits (and the filter
-    // functions' original bytes are gone), so always start from the backup.
-    if state != patch::State::Stock {
-        if backup::exists(install) {
-            if args.dry_run {
-                println!("  {state}; would restore the backup first");
-            } else {
-                let src = backup::restore(install, node)
-                    .map_err(|e| format!("restoring backup: {e}"))?;
-                println!("  {state}; restored {} first", src.display());
-                data = read_node(node)?;
-            }
-        } else {
-            return Err(format!(
-                "{} is {state}, and no backup is on record here.\n\
-                 Its original instructions are gone, so there is nothing left to\n\
-                 patch against. Delete {}\n\
-                 and start Discord so it re-downloads a stock module, then patch.",
-                node.display(),
-                node.parent().unwrap_or(node).display()
-            ));
+    // Everything the interface does, minus the interface. The two share
+    // `apply` precisely so that "patched" cannot come to mean two things.
+    let mut log = |note: apply::Note| {
+        let text = match note {
+            apply::Note::Info(t) | apply::Note::Good(t) => t,
+            apply::Note::Warn(t) => t,
+            apply::Note::Bad(t) => t,
+        };
+        for line in text.lines() {
+            println!("  {line}");
         }
+    };
+
+    let prepared = apply::prepare(install, node, args.dry_run, &mut log)?;
+    apply::report_gaps(&prepared, &mut log);
+
+    if prepared.blocked() && !args.allow_partial {
+        println!(
+            "  Refusing to patch. Pass --allow-partial to apply the rest anyway."
+        );
+        return Ok(false);
     }
-
-    let syms = elf::symbols(&data);
-    let report = resolve::resolve_all(&data, syms.as_ref());
-    let missing = report.missing();
-    let real_missing: Vec<&str> = missing
-        .iter()
-        .copied()
-        .filter(|n| excused(n, &report).is_none())
-        .collect();
-    let critical_missing: Vec<&str> = real_missing
-        .iter()
-        .copied()
-        .filter(|n| sites::find(n).map(|s| s.critical).unwrap_or(true))
-        .collect();
-    if !missing.is_empty() {
-        println!("  {} of {} sites located", report.order.len() - missing.len(), report.order.len());
-        for name in &missing {
-            if let Some(note) = excused(name, &report) {
-                println!("    n/a     {name} - {note}");
-                continue;
-            }
-            match report.outcomes.get(name) {
-                Some(Outcome::Ambiguous { found, wanted }) => {
-                    println!("    AMBIG   {name} (matched {found}, expected {wanted})")
-                }
-                _ => println!("    MISSING {name}"),
-            }
-        }
-        if !critical_missing.is_empty() && !args.allow_partial {
-            println!(
-                "  Refusing to patch: {} of the missing sites decide whether audio is\n  \
-                 mono or stereo, so a partial patch here would negotiate stereo and\n  \
-                 still send one channel. Pass --allow-partial to apply the rest anyway.",
-                critical_missing.len()
-            );
-            return Ok(false);
-        }
-        if critical_missing.is_empty() {
-            if real_missing.is_empty() {
-                println!("  Everything this build needs resolved. Proceeding.");
-            } else {
-                println!(
-                    "  All stereo-critical sites resolved; the rest are quality\n  \
-                     refinements (bitrate, CELT, the encoder locks, and the filter\n  \
-                     and capture-processing bypasses). Proceeding."
-                );
-            }
-        } else {
-            println!("  --allow-partial given; applying the sites that did resolve");
-        }
-    } else {
-        println!("  all {} sites located", report.order.len());
-    }
-
-    // The picker is the confirmation step when it runs: choosing the groups and
-    // pressing enter is the same decision the y/N prompt used to ask for, so
-    // asking again afterwards would just be a second prompt for one choice.
-    let mut cfg = cfg.clone();
-    let mut picked = false;
-    if args.groups.is_none() && !args.yes {
-        match tui::pick(&install.label(), &report, cfg.bitrate_kbps) {
-            Some(tui::Choice::Apply(groups)) => {
-                cfg.groups = groups;
-                picked = true;
-            }
-            Some(tui::Choice::Cancel) => {
-                println!("  cancelled");
-                return Ok(false);
-            }
-            // No terminal to draw on; the defaults already in cfg stand.
-            None => {}
-        }
+    if prepared.blocked() {
+        println!("  --allow-partial given; applying the sites that did resolve");
     }
     if cfg.groups.is_empty() {
         println!("  no groups selected; nothing to do");
         return Ok(false);
     }
-    let cfg = &cfg;
 
-    let plan = patch::build(&report, cfg, &data);
-    let errors = patch::check(&plan, &data);
-    if !errors.is_empty() {
-        for e in &errors {
-            println!("    {e}");
-        }
-        return Err(
-            "signature matched unexpected bytes; nothing was written. Please report the\n\
-             build (size and md5 above) so the catalogue can be updated."
-                .to_string(),
-        );
-    }
-
-    // Describe what this plan actually does, not what a complete one would:
-    // on a build where some sites could not be located, claiming the filters
-    // are bypassed when they were skipped is exactly the kind of quiet
-    // overstatement that sent the last few hours sideways.
-    let mut effects: Vec<String> = Vec::new();
-    let has = |group: &str| plan.edits.iter().any(|e| e.group == group);
-    let applied = |name: &str| plan.edits.iter().any(|e| e.site == name);
-    if has("stereo") {
-        // Say separately whether the network adaptor's mid-call downgrade is
-        // blocked. A build where that site did not apply still starts the call
-        // in stereo and can fall back to mono once the uplink estimate dips,
-        // which sounds like the patch wearing off rather than like what it is.
-        effects.push(if applied("ChannelController_ForceStereo") {
-            "stereo (held against the network adaptor)".to_string()
-        } else {
-            "stereo".to_string()
-        });
-    }
-    if has("samplerate") {
-        effects.push("48 kHz".to_string());
-    }
-    if has("bitrate") {
-        effects.push(format!("{} kbps", cfg.bitrate_kbps));
-    }
-    if has("opus") {
-        effects.push("audio mode".to_string());
-    }
-    if has("encoder") {
-        effects.push("FEC/DTX off, complexity 10, fullband".to_string());
-    }
-    if has("celt") {
-        effects.push("CELT".to_string());
-    }
-    if has("gain") {
-        effects.push("no auto-gain".to_string());
-    }
-    if has("denoise") {
-        effects.push("no noise removal".to_string());
-    }
-    if has("echo") {
-        effects.push("no echo cancellation".to_string());
-    }
-    if has("cbr") {
-        effects.push("constant bitrate".to_string());
-    }
-    // "Filterless" means both Opus input filters are out of the path. That can
-    // happen three ways per filter: the function was replaced, its coefficient
-    // was neutralised, or the build cannot reach it at all. Count all three,
-    // otherwise a fully-bypassed build reports as a partial one.
-    let hp_done = applied("HpCutoff_Inject") || excused("HpCutoff_Inject", &report).is_some();
-    let dc_done = applied("DcReject_Inject") || applied("DcReject_Coefficient");
-    if hp_done && dc_done {
-        effects.push(if cfg.gain != 1.0 {
-            format!("filters bypassed (gain x{})", cfg.gain)
-        } else {
-            "filters bypassed".to_string()
-        });
-    } else if has("filter") {
-        effects.push("high-pass bypassed (opus filters still active)".to_string());
+    let plan = apply::plan(&prepared, cfg)?;
+    if plan.edits.is_empty() {
+        println!("  nothing to change for the groups selected");
+        return Ok(false);
     }
     println!(
         "  {} edits, {} bytes: {}",
         plan.edits.len(),
         plan.total_bytes(),
-        effects.join(", ")
+        apply::effects(&plan, &prepared.report, cfg).join(", ")
     );
     if args.verbose {
         for e in &plan.edits {
@@ -745,55 +614,13 @@ fn patch_one(
         println!("  dry run; nothing written");
         return Ok(false);
     }
-
-    if !args.yes && !picked && !confirm(&format!("  Patch {}?", node.display()))? {
+    if !args.yes && !confirm(&format!("  Patch {}?", node.display()))? {
         println!("  skipped");
         return Ok(false);
     }
 
-    let (backup_path, created) = backup::ensure(install, node)
-        .map_err(|e| format!("creating backup: {e}"))?;
-    println!(
-        "  backup {} {}",
-        if created { "written to" } else { "already at" },
-        backup_path.display()
-    );
-
-    patch::apply(&plan, &mut data);
-    write_node(node, &data)?;
-
-    let readback = read_node(node)?;
-    let failed = patch::verify(&plan, &readback);
-    if !failed.is_empty() {
-        return Err(format!(
-            "verification failed after writing: {}. Restore with 'stereocord restore'.",
-            failed.join(", ")
-        ));
-    }
-    println!("  verified, md5 now {}", md5::hex(&readback));
+    apply::commit(install, node, prepared, &plan, &mut log)?;
     Ok(true)
-}
-
-/// Write through a temporary file and rename, so an interrupted write cannot
-/// leave a half-patched module in place.
-fn write_node(node: &Path, data: &[u8]) -> Result<(), String> {
-    let mode = fs::metadata(node).ok().map(|m| {
-        use std::os::unix::fs::PermissionsExt;
-        m.permissions().mode()
-    });
-    let tmp = node.with_extension("node.stereocord.part");
-    {
-        let mut f = fs::File::create(&tmp)
-            .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-        f.write_all(data).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-        f.sync_all().map_err(|e| format!("syncing {}: {e}", tmp.display()))?;
-    }
-    if let Some(mode) = mode {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode));
-    }
-    fs::rename(&tmp, node).map_err(|e| format!("replacing {}: {e}", node.display()))?;
-    Ok(())
 }
 
 fn cmd_restore(args: &Args) -> Result<(), String> {
@@ -818,16 +645,16 @@ fn cmd_restore(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// The same text the picker shows, for anyone reading the tool rather than
-/// driving it.
+/// The same text the interface shows beside each checkbox, for anyone reading
+/// the tool rather than driving it.
 fn cmd_groups() {
     // Written through a handle with the errors dropped rather than with
     // `println!`, so `stereocord groups | head` closes the pipe quietly instead
     // of panicking partway down the list.
     let out = std::io::stdout();
     let mut w = out.lock();
-    let _ = writeln!(w, "Patch groups. 'patch' asks which of these to apply; --groups picks");
-    let _ = writeln!(w, "them on the command line, and --groups all selects every one.\n");
+    let _ = writeln!(w, "Patch groups. The interface offers these as checkboxes; on the command");
+    let _ = writeln!(w, "line --groups picks them, and --groups all selects every one.\n");
     for g in sites::GROUPS {
         let n = sites::SITES.iter().filter(|s| s.group == g.name).count();
         let plural = if n == 1 { "change" } else { "changes" };

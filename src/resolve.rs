@@ -86,6 +86,26 @@ impl Report {
             .collect()
     }
 
+    /// A missing site that this build genuinely does not need, and why.
+    ///
+    /// Returns the explanation when absence is fine, `None` when it is a real
+    /// gap. Reported instead of a bare MISSING so that a build which simply
+    /// does not have the code does not look like one the catalogue has aged
+    /// out of.
+    pub fn excused(&self, name: &str) -> Option<&'static str> {
+        let site = sites::find(name)?;
+        let absent = site.absent_ok.as_ref()?;
+        match absent.covered_by {
+            // Only excused if whatever covers it actually resolved.
+            Some(other) => self.resolved(other).map(|_| absent.note),
+            None => Some(absent.note),
+        }
+    }
+
+    /// Located, or legitimately not needed here.
+    pub fn covered(&self, name: &str) -> bool {
+        self.resolved(name).is_some() || self.excused(name).is_some()
+    }
 }
 
 /// Locate every site in `data`.

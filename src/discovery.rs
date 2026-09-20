@@ -32,11 +32,50 @@ pub struct Install {
     /// `None` when the module directory exists but Discord has not finished
     /// downloading the voice module into it yet.
     pub node: Option<PathBuf>,
+    /// Overrides the name the backup is filed under. Set only for modules the
+    /// user pointed at by path: those have no channel and no version to be
+    /// named after, and two of them must not end up sharing one backup.
+    pub key: Option<String>,
 }
 
 impl Install {
     pub fn label(&self) -> String {
-        format!("{} {}", self.channel, self.version)
+        if self.version.0.is_empty() {
+            self.channel.clone()
+        } else {
+            format!("{} {}", self.channel, self.version)
+        }
+    }
+
+    /// Stand in for an install when the user has named a module by path.
+    ///
+    /// Custom clients ship Discord's own voice module, so patching one is the
+    /// same operation — but the path is all there is to identify it by, so the
+    /// backup is filed under a digest of that path rather than under a channel
+    /// and version that would collide with every other such module.
+    pub fn for_path(node: &Path) -> Install {
+        let canonical = node.canonicalize().unwrap_or_else(|_| node.to_path_buf());
+        let digest = crate::md5::hex(canonical.to_string_lossy().as_bytes());
+        // An `app-<version>` component means this is a Discord tree after all,
+        // just one reached by path; carrying the version through makes the
+        // readout say something useful instead of nothing.
+        let version = canonical
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .find_map(|c| c.strip_prefix("app-"))
+            .map(Version::parse)
+            .unwrap_or(Version(Vec::new()));
+        Install {
+            channel: "Custom module".to_string(),
+            version,
+            app_dir: canonical
+                .ancestors()
+                .find(|a| a.join("modules").is_dir())
+                .unwrap_or_else(|| canonical.parent().unwrap_or(&canonical))
+                .to_path_buf(),
+            node: Some(canonical),
+            key: Some(format!("custom-{}", &digest[..12])),
+        }
     }
 }
 
@@ -51,7 +90,7 @@ impl std::fmt::Display for Version {
 }
 
 impl Version {
-    fn parse(s: &str) -> Version {
+    pub fn parse(s: &str) -> Version {
         Version(s.split('.').filter_map(|p| p.parse().ok()).collect())
     }
 }
@@ -62,6 +101,14 @@ const CHANNELS: &[(&str, &str)] = &[
     ("discordcanary", "Discord Canary"),
     ("discorddevelopment", "Discord Development"),
 ];
+
+/// The display names of every channel this tool knows about, in the order they
+/// should be offered. Channels with nothing installed are still worth showing —
+/// "Canary: not installed" answers the question, where a list that silently
+/// omits it does not.
+pub fn known_channels() -> Vec<&'static str> {
+    CHANNELS.iter().map(|(_, name)| *name).collect()
+}
 
 fn config_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
@@ -113,6 +160,7 @@ pub fn find_installs() -> Vec<Install> {
                     version: Version::parse(ver),
                     node: voice_node_in(&app_dir),
                     app_dir,
+                    key: None,
                 });
             }
         }
@@ -144,6 +192,62 @@ fn voice_node_in(app_dir: &Path) -> Option<PathBuf> {
     }
     candidates.sort();
     candidates.pop()
+}
+
+/// The `modules/discord_voice-<n>` directory a voice module lives in.
+///
+/// That whole directory is the unit Discord's module updater installs and
+/// replaces, so it is also the unit to delete when the point is to make it
+/// fetch a fresh one.
+pub fn module_dir(node: &Path) -> Option<PathBuf> {
+    // .../modules/discord_voice-1/discord_voice/discord_voice.node
+    let dir = node.parent()?.parent()?;
+    let name = dir.file_name()?.to_string_lossy().to_string();
+    // Refuse anything that is not shaped like the directory we expect, so a
+    // surprising layout deletes nothing rather than deleting the wrong thing.
+    if !name.starts_with("discord_voice-") {
+        return None;
+    }
+    Some(dir.to_path_buf())
+}
+
+/// Discord's updater database for the install in `app_dir`.
+///
+/// It sits beside the `app-<version>` directories, one per channel, and records
+/// which host version and which modules are installed. Nothing else in this
+/// tool reads it; [`crate::manage`] removes it to make the updater fetch a
+/// fresh module, which is the only thing that actually works.
+///
+/// `None` when `app_dir` is not inside a channel directory this tool knows,
+/// so that a path from somewhere unexpected cannot nominate a file for
+/// deletion.
+pub fn installer_db(app_dir: &Path) -> Option<PathBuf> {
+    let root = app_dir.parent()?;
+    let name = root.file_name()?.to_string_lossy().to_string();
+    if !CHANNELS.iter().any(|(dir, _)| *dir == name) {
+        return None;
+    }
+    Some(root.join("installer.db"))
+}
+
+/// True when this install has modules but no voice module.
+///
+/// The difference matters, and neither the file system nor Discord will state
+/// it. An install that has never been launched has an empty `modules/` and
+/// simply needs starting; one whose `modules/` is full of everything *except*
+/// the voice module had it removed, and Discord will not fetch it back on its
+/// own — the updater's record still says it is installed. Telling the second
+/// case to "launch Discord once" is advice that cannot work.
+pub fn voice_module_removed(app_dir: &Path) -> bool {
+    if voice_node_in(app_dir).is_some() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(app_dir.join("modules")) else { return false };
+    entries.flatten().any(|e| {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        name.starts_with("discord_") && !name.starts_with("discord_voice-")
+    })
 }
 
 /// PIDs of running Discord processes launched from `app_dir`.

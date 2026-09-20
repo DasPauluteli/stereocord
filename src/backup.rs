@@ -30,6 +30,9 @@ pub fn dir() -> PathBuf {
 }
 
 fn slug(install: &Install) -> String {
+    if let Some(key) = &install.key {
+        return key.clone();
+    }
     format!(
         "{}-{}",
         install.channel.replace(' ', "_").to_lowercase(),
@@ -72,6 +75,33 @@ pub fn restore(install: &Install, node: &Path) -> io::Result<PathBuf> {
     fs::copy(&src, &tmp)?;
     fs::rename(&tmp, node)?;
     Ok(src)
+}
+
+/// Forget the backup for one install.
+///
+/// Only ever the tool's own copy under `XDG_STATE_HOME`; the module itself is
+/// never touched here. Deleting a backup makes that install unrestorable, so
+/// every caller asks first.
+pub fn remove(install: &Install) -> io::Result<PathBuf> {
+    let path = path_for(install);
+    fs::remove_file(&path)?;
+    Ok(path)
+}
+
+/// Keep a copy of Discord's updater database before it is removed.
+///
+/// It holds no user data — an install id, and the versions and file manifests
+/// of what is installed — but it is Discord's, not ours, and deleting someone
+/// else's file without keeping a copy is not a thing to do on a hunch. Kept
+/// under this tool's own directory rather than beside the original, so that
+/// Discord never sees a file it did not put there.
+pub fn keep_registry(install: &Install, db: &Path) -> io::Result<PathBuf> {
+    let dest = dir().join(format!("{}-installer.db", slug(install)));
+    fs::create_dir_all(dir())?;
+    let tmp = dest.with_extension("db.part");
+    fs::copy(db, &tmp)?;
+    fs::rename(&tmp, &dest)?;
+    Ok(dest)
 }
 
 pub struct Entry {

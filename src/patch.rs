@@ -66,7 +66,7 @@ impl Plan {
 /// Turn resolved offsets into the bytes that will be written.
 /// Resolve a RIP-relative operand: `offset` points at the disp32, which is
 /// relative to the end of the instruction it belongs to.
-fn rip_target(data: &[u8], disp_at: usize) -> Option<usize> {
+pub fn rip_target(data: &[u8], disp_at: usize) -> Option<usize> {
     let bytes = data.get(disp_at..disp_at + 4)?;
     let disp = i32::from_le_bytes(bytes.try_into().ok()?);
     let next_insn = disp_at + 4;

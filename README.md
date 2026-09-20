@@ -11,6 +11,11 @@ module by patching `discord_voice.node`, and switches off the noise suppression,
 automatic gain and echo cancellation that would otherwise reshape the signal
 before it is ever encoded. Everything is grouped and optional.
 
+Run it with no arguments and it opens a terminal interface: pick a client, read
+what its voice module is currently doing to your audio in plain words, and patch
+or restore from there. Give it a command and it behaves as a plain command-line
+tool instead.
+
 It started as a Rust reimplementation of the Linux half of ProdHallow's
 [Discord-Stereo-Windows-MacOS-Linux](https://github.com/ProdHallow/Discord-Stereo-Windows-MacOS-Linux),
 which was discontinued in August 2026 (last functional commit `5e96ff0`), and it
@@ -24,8 +29,9 @@ between the two.
 
 ## What it changes
 
-Patches are organised into groups you switch on and off. `patch` opens a picker;
-`stereocord groups` prints the same descriptions as plain text.
+Patches are organised into groups you switch on and off. The interface shows
+them as checkboxes with a plain-language summary each; `--groups` picks them on
+the command line, and `stereocord groups` prints the same descriptions as text.
 
 | Group | On by default | Effect |
 | --- | :---: | --- |
@@ -66,27 +72,71 @@ cargo build --release
 ```
 
 ```bash
+./target/release/stereocord
+```
+
+With no arguments, that opens the interface. Three screens:
+
+**Choose a client.** Every Discord channel this tool knows about, with the ones
+that are not installed here greyed out rather than hidden. The last entry takes
+a path instead, for a custom client shipping Discord's own voice module —
+backups are kept for those too, filed under a digest of the path.
+
+**Read what the module is doing.** A dozen lines in plain words — true stereo
+working or not, sample rate, bitrate, encoder mode, the low cut and the high
+cut, whether automatic gain, noise removal and echo cancellation are still in
+the path — green for "your signal gets through", red for "Discord is still
+changing it", and an explicit *cannot tell* rather than a guess where the file
+does not say. Where a backup exists it is read against that, which is what makes
+a patched module legible at all: patching overwrites the very instructions most
+signatures key on, so a patched file scanned on its own can only report what
+happens to have survived.
+
+**Then patch, or manage.** Patching is the checkbox list, with a bitrate control
+and a count of how many of each group's changes exist in your build. Managing is
+restoring the original, forgetting the backup, or making Discord reinstall the
+module — the way out when a module was patched by something that kept no backup,
+or when an update is stuck. Anything destructive stops at a dialog that names the
+file, and defaults to *Cancel*.
+
+Reinstalling clears Discord's record of the module as well as the module itself,
+and it has to. Discord's updater keeps what it has installed in `installer.db`
+and trusts that record without checking the files are still there, so a module
+deleted on its own is never replaced — the next launch logs `Install of module
+discord_voice finished successfully`, having downloaded nothing, and the client
+then reports itself corrupt. Clearing the record makes the updater fetch
+everything again on the next start. That file holds an install id and version
+manifests and nothing else; logins, servers and settings are in sibling files and
+are untouched, and a copy of it is kept under
+`~/.local/state/stereocord/backups/`.
+
+If that has already happened to you — a voice module that is gone and a client
+that says the installation is corrupt — the install still shows up in the list,
+with the reason, and its manage screen is the way back.
+
+Re-opening a module that is already patched starts the checkboxes from what it
+already has rather than from the defaults, so re-patching after a Discord update
+keeps the choices you made last time.
+
+### Without the interface
+
+```bash
 ./target/release/stereocord scan
 ```
 
 `scan` lists every Discord install, marks the one Discord will actually launch,
-and reports whether each of the 37 patch sites can be located in that build.
-Run it before patching: a site that cannot be located is reported as missing
-rather than quietly worked around.
+prints the same plain-words readout, and reports whether each of the 37 patch
+sites can be located in that build. A site that cannot be located is reported as
+missing rather than quietly worked around.
 
 ```bash
-./target/release/stereocord patch
+./target/release/stereocord patch --groups all --yes
 ```
 
-This opens a picker: arrow keys to move, space to toggle a group, enter to apply.
-Each group shows a plain-language summary and how many of its changes were found
-in your build. Pass `--groups stereo,bitrate` (or `--groups all`) to skip the
-picker, and `--yes` to take the defaults without being asked. Without a terminal
-— a script, a pipe — it falls back to the defaults rather than failing.
-
 Close Discord first. `patch` backs the module up, applies the edits, reads the
-file back and verifies every byte landed. `--dry-run` shows the plan without
-writing; `-v` prints every offset.
+file back and verifies every byte landed. Without `--groups` it applies the
+recommended set; `--dry-run` shows the plan without writing, `-v` prints every
+offset, and `--yes` skips the confirmation.
 
 ```bash
 ./target/release/stereocord restore
@@ -96,17 +146,16 @@ Puts the original module back. Backups live in
 `~/.local/state/stereocord/backups/`, one per install, and are never
 overwritten by an already-patched copy.
 
-Other commands: `groups` prints every group and what it does, `backups` lists
-what is on record, `shellcode` prints the injected filter replacements as bytes,
-`scan --node <path>` inspects an arbitrary `discord_voice.node` without touching
-any install.
+Other commands: `tui` opens the interface explicitly, `groups` prints every
+group and what it does, `backups` lists what is on record, `shellcode` prints
+the injected filter replacements as bytes, and `scan --node <path>` inspects an
+arbitrary `discord_voice.node` without touching any install.
 
-Useful options: `-g/--groups <list>` to choose groups without the picker
-(`--groups all` selects every one), `-b/--bitrate <kbps>` (8–512, default 248),
-`--gain <factor>` applied by the injected filters, `-c/--client <text>` to narrow
-to one install, `-a/--all` for every install rather than the newest per channel,
-`--allow-partial` to apply the sites that did resolve on a build where some did
-not.
+Useful options: `-g/--groups <list>` (`--groups all` selects every one),
+`-b/--bitrate <kbps>` (8–512, default 248), `--gain <factor>` applied by the
+injected filters, `-c/--client <text>` to narrow to one install, `-a/--all` for
+every install rather than the newest per channel, `--allow-partial` to apply the
+sites that did resolve on a build where some did not.
 
 <!-- roundtrip:begin -->
 ## Before & after
@@ -180,7 +229,8 @@ measurement: the result comes back mono and looks like the patch failed.
 
 The long-form documentation lives in [the wiki](https://github.com/DasPauluteli/stereocord/wiki):
 
-- [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works) — how sites are located and validated, what the injected filters do, why there is no frame-size patch, and what Discord's capture-side processing does to the signal
+- [The interface](https://github.com/DasPauluteli/stereocord/wiki/The-interface) — the three screens, what the readout means, and what the manage screen will and will not do
+- [How it works](https://github.com/DasPauluteli/stereocord/wiki/How-it-works) — how sites are located and validated, what the injected filters do, why there is no frame-size patch, what Discord's capture-side processing does to the signal, and how a patched module is read back when patching overwrites the very instructions that identify it
 - [Measuring](https://github.com/DasPauluteli/stereocord/wiki/Measuring) — measuring the round trip through a real call
 
 ## How it differs from the original
@@ -214,8 +264,11 @@ one or the other today. Nothing is ever downloaded.
 whatever `g++`/`clang++` the machine had, and copied the resulting function
 bodies into the binary — so the injected bytes depended on the host toolchain.
 The two filter replacements here are emitted byte by byte (see
-`src/shellcode.rs`), so the same input always produces the same patch and there
-is no build dependency.
+`src/shellcode.rs`), so the same input always produces the same patch and a C++
+toolchain is never needed. Everything that reads or writes the module — ELF
+parsing, signature matching, MD5 — is in this repository and depends on nothing;
+the one Cargo dependency, [ratatui](https://ratatui.rs), draws the interface and
+is not reached by any code path that touches a file.
 
 **It refuses rather than half-works.** Signature matches are checked against the
 bytes each site expects before anything is written, every edit is read back
@@ -297,7 +350,8 @@ chart above, and it is a simulation rather than a Discord measurement.
   mono, correctly. Feed Discord a stereo input.
 - **The defaults turn off echo cancellation.** On headphones that is what you
   want. On speakers, everyone else in the call will hear themselves echoing back
-  — untick `echo` in the picker, or leave it out of `--groups`.
+  — untick **No echo cancellation** in the interface, or leave `echo` out of
+  `--groups`.
 - Turning off noise suppression and automatic gain means your room and your
   input level go out as they are. Set your level yourself; nothing downstream
   will rescue a quiet or clipping source.
@@ -309,7 +363,14 @@ chart above, and it is a simulation rather than a Discord measurement.
   so Discord goes on launching the old version and the staged `app-` directory
   sits half-populated — it looks like a stalled download. To take an update:
   `stereocord restore`, start Discord and let it update, quit, then
-  `stereocord patch` again. `scan` detects this state and says so.
+  `stereocord patch` again. `scan` detects this state and says so, and the
+  interface's manage screen can make Discord reinstall the module outright if
+  restoring is no longer possible.
+- **Deleting a voice module by hand does not make Discord replace it.** Its
+  updater believes its own record of what is installed, so the module stays
+  missing, voice stops working and the client reports itself corrupt. Use
+  *Reinstall the voice module* in the manage screen, which clears that record
+  too.
 - Editing client files is against Discord's terms of service (see the warning at
   the top). Your account, your call.
 
