@@ -438,7 +438,20 @@ fn report_sites(node: &Path, verbose: bool, install: Option<&Install>) -> Result
             row.value
         );
     }
-    if facts.baseline == status::Baseline::SelfScan && facts.state != patch::State::Stock {
+    // Only worth saying when something actually came back unreadable. A patched
+    // module whose sites all resolve has nothing for this paragraph to explain,
+    // and printing it anyway reads as a warning about the module.
+    let genuine_gap = facts.report.order.iter().any(|name| {
+        !matches!(
+            facts.report.outcomes.get(name),
+            Some(Outcome::Found(_)) | Some(Outcome::Ambiguous { .. })
+        ) && facts.report.excused(name).is_none()
+    });
+    let unreadable = facts.rows.iter().any(|r| r.level == status::Level::Unknown) || genuine_gap;
+    if facts.baseline == status::Baseline::SelfScan
+        && facts.state != patch::State::Stock
+        && unreadable
+    {
         println!(
             "\n  No backup is on record for this module, and a patch overwrites the\n  very bytes most signatures key on. So the lines above and below that say\n  they cannot be read are a limit of what is knowable here, not a fault in\n  the module. Restore it, or scan a stock copy, to see the rest."
         );

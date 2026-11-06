@@ -287,6 +287,7 @@ the newest install per channel that has a module.
 
 | Build | Sites | Notes |
 | --- | --- | --- |
+| Stable 1.0.168 | 33/37 + 4 n/a | fully covered, with no new signature needed |
 | Stable 1.0.158 | 33/37 + 4 n/a | fully covered |
 | Stable 1.0.157 | 33/37 + 4 n/a | fully covered |
 | Stable 1.0.155 | 33/37 + 4 n/a | fully covered |

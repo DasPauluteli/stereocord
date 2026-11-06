@@ -346,9 +346,17 @@ pub static SITES: &[Site] = &[
         expect: Expect::NearestAfter { anchor: "SelectSampleRate_48k", window: 0x60 },
         symbols: &[SYM_CREATE_AUDIO_FRAME],
         entry: false,
+        // The last two encodings are the first two as this tool leaves them.
+        // A whole instruction is replaced here, not a field inside one, so the
+        // site cannot wildcard its way to resolving on a patched module the way
+        // the config sites do - without them an already-patched build reports
+        // its own work as a missing site. Stock encodings are tried first, and
+        // re-patching a match is writing the bytes that are already there.
         patterns: &[
             ("49 39 C4 4C 0F 43 E0 4D 89 66 28", 0),
             ("49 39 D4 4C 0F 43 E2 C1 E9 02 69 C9 7B 14 00 00", 0),
+            ("49 C7 C4 02 00 00 00 4D 89 66 28", 0),
+            ("49 C7 C4 02 00 00 00 C1 E9 02 69 C9 7B 14 00 00", 0),
         ],
         action: Action::Bytes(FORCE_TWO_CHANNELS),
         stock: &[],
@@ -372,9 +380,15 @@ pub static SITES: &[Site] = &[
         // where the first has `je 0x09` and a short one. Which register holds
         // the frame pointer moved from r14 to r15 in 1.0.157, so the call setup
         // is carried in both encodings.
+        // As with the channel count, the last two are the first two once this
+        // tool has been here: the twelve `nop`s are what the guard becomes, and
+        // they are what tells the patched block from the untouched one that
+        // sits right above it.
         patterns: &[
             ("4C 89 F7 E8 ?? ?? ?? ?? 84 C0 74 0D 83 BB ?? ?? ?? ?? 09 0F 8F", 8),
             ("4C 89 FF E8 ?? ?? ?? ?? 84 C0 74 0D 83 BB ?? ?? ?? ?? 09 0F 8F", 8),
+            ("4C 89 F7 E8 ?? ?? ?? ?? 90 90 90 90 90 90 90 90 90 90 90 90 E9", 8),
+            ("4C 89 FF E8 ?? ?? ?? ?? 90 90 90 90 90 90 90 90 90 90 90 90 E9", 8),
         ],
         action: Action::Bytes(NOP12_JMP),
         // Only the leading opcodes are fixed; the `cmp` displacement moves
@@ -1091,14 +1105,21 @@ pub static SITES: &[Site] = &[
 
 /// Shared by four sites: the `AudioEncoderOpusConfig` constructor stores
 /// frame_ms, channels, bitrate and application as immediates in one run.
+///
+/// Because they share it, none of those four values can be a fixed token here.
+/// `application` was one, pinned to kVoip, and the whole pattern stopped
+/// matching the moment `OpusConfig_Application` had written kAudio - which cost
+/// all four sites the sentinel property the rest of this file relies on, and
+/// reported a correctly patched module as a build whose code had moved.
 const OPUS_CONFIG_CTOR: &str = "55 48 89 E5 48 B8 ?? 00 00 00 80 BB 00 00 48 89 07 48 C7 47 08 ?? 00 00 00 \
-     48 B8 00 00 00 00 ?? ?? ?? 00 48 89 47 10 C6 47 18 ??";
+     48 B8 ?? 00 00 00 ?? ?? ?? 00 48 89 47 10 C6 47 18 ??";
 
 /// 1.0.155 inlines the constructor into its caller's stack frame, so the same
 /// stores appear as `mov [rbp-disp32], ...` rather than `mov [rdi+disp8], ...`.
-/// Field order and values are unchanged.
+/// Field order and values are unchanged, and so is the rule above about which
+/// of them may be fixed.
 const OPUS_CONFIG_CTOR_INLINED: &str = "48 B8 ?? 00 00 00 80 BB 00 00 48 89 85 ?? ?? ?? ?? \
-     48 C7 85 ?? ?? ?? ?? ?? 00 00 00 48 B8 00 00 00 00 ?? ?? ?? 00 48 89 85 ?? ?? ?? ?? \
+     48 C7 85 ?? ?? ?? ?? ?? 00 00 00 48 B8 ?? 00 00 00 ?? ?? ?? 00 48 89 85 ?? ?? ?? ?? \
      C6 85 ?? ?? ?? ?? ??";
 
 /// Same idea for the multichannel variant.
